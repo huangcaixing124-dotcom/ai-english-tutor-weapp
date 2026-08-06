@@ -1,0 +1,188 @@
+<!-- 可点击单词的英文内容 -->
+<wxs module="wordUtil">
+  function isWordToken(t) { return t.isWord; }
+</wxs>
+
+<!-- 主页面 -->
+<view class="page-container">
+  <!-- 顶部安全区 + 标题 -->
+  <view class="header" style="padding-top: {{statusBarHeight}}px;">
+    <view class="header-inner">
+      <text class="header-title">AI English Tutor</text>
+      <text class="header-subtitle">Your personal speaking coach</text>
+    </view>
+  </view>
+
+  <!-- 场景/难度选择 -->
+  <view class="selector-section">
+    <view class="selector-row">
+      <picker mode="selector" range="{{scenarioNames}}" value="{{currentScenarioIndex}}"
+        bindchange="onScenarioChange" class="picker-selector">
+        <view class="picker-label">
+          <text class="picker-label-text">Scenario</text>
+          <text class="picker-value">{{scenarios[currentScenarioIndex].label}}</text>
+          <text class="picker-arrow">▼</text>
+        </view>
+      </picker>
+      <picker mode="selector" range="{{difficultyNames}}" value="{{currentDifficultyIndex}}"
+        bindchange="onDifficultyChange" class="picker-selector">
+        <view class="picker-label">
+          <text class="picker-label-text">Level</text>
+          <text class="picker-value">{{difficulties[currentDifficultyIndex].label}}</text>
+          <text class="picker-arrow">▼</text>
+        </view>
+      </picker>
+    </view>
+  </view>
+
+  <!-- 角色区域 -->
+  <view class="character-section">
+    <character state="{{characterState}}" />
+    <!-- TTS 播放声波动画 -->
+    <view class="voice-indicator {{isSpeaking ? 'active' : ''}}">
+      <view class="voice-bar voice-bar-green" wx:for="{{5}}" wx:key="play-{{index}}"
+        style="height: {{playBarHeights[index]}}px; background: var(--apple-green);" />
+    </view>
+  </view>
+
+  <!-- 对话展示区 -->
+  <scroll-view class="conversation-section" scroll-y="true" scroll-with-animation="true"
+    scroll-into-view="conversation-bottom">
+    <view class="conversation-list">
+      <!-- 对话历史（遍历展示） -->
+      <block wx:for="{{displayTurns}}" wx:key="index">
+        <view class="slide-up">
+          <!-- 用户消息 -->
+          <view class="bubble-user">
+            <text class="bubble-user-text">{{item.user}}</text>
+          </view>
+          <!-- AI 回复 -->
+          <view class="bubble-group" style="margin-top: 12rpx;">
+            <view class="bubble bubble-ai">
+              <view class="bubble-icon bubble-icon-green">
+                <text class="bubble-icon-text">✓</text>
+              </view>
+              <view class="bubble-body">
+                <text class="bubble-label">English <text class="word-hint">(tap words)</text></text>
+                <view class="word-container">
+                  <block wx:for="{{item.tokens}}" wx:key="*this" wx:for-item="word">
+                    <text wx:if="{{word.isWord}}" class="word-tappable" data-word="{{word.text}}" bindtap="onWordTap">{{word.text}}</text>
+                    <text wx:else class="word-punct">{{word.text}}</text>
+                  </block>
+                </view>
+              </view>
+            </view>
+            <view class="bubble bubble-ai">
+              <view class="bubble-icon bubble-icon-blue">
+                <text class="bubble-icon-text">中</text>
+              </view>
+              <view class="bubble-body">
+                <text class="bubble-label">中文翻译</text>
+                <text class="bubble-text bubble-text-secondary">{{item.ai.chinese}}</text>
+              </view>
+            </view>
+            <view class="bubble bubble-ai bubble-correction" wx:if="{{item.ai.correction}}">
+              <view class="bubble-icon bubble-icon-orange">
+                <text class="bubble-icon-text">!</text>
+              </view>
+              <view class="bubble-body">
+                <text class="bubble-label bubble-label-orange">AI Tip</text>
+                <text class="bubble-text bubble-text-secondary">{{item.ai.correction}}</text>
+              </view>
+            </view>
+          </view>
+        </view>
+      </block>
+
+      <!-- 欢迎语（无对话时展示） -->
+      <block wx:if="{{showWelcome && displayTurns.length === 0}}">
+        <view class="slide-up">
+          <view class="bubble-group">
+            <view class="bubble bubble-ai">
+              <view class="bubble-icon bubble-icon-green">
+                <text class="bubble-icon-text">✓</text>
+              </view>
+              <view class="bubble-body">
+                <text class="bubble-label">English <text class="word-hint">(tap words)</text></text>
+                <view class="word-container">
+                  <block wx:for="{{wordTokens}}" wx:key="*this">
+                    <text wx:if="{{item.isWord}}" class="word-tappable" data-word="{{item.text}}" bindtap="onWordTap">{{item.text}}</text>
+                    <text wx:else class="word-punct">{{item.text}}</text>
+                  </block>
+                </view>
+              </view>
+            </view>
+            <view class="bubble bubble-ai">
+              <view class="bubble-icon bubble-icon-blue">
+                <text class="bubble-icon-text">中</text>
+              </view>
+              <view class="bubble-body">
+                <text class="bubble-label">中文翻译</text>
+                <text class="bubble-text bubble-text-secondary">{{scenarios[currentScenarioIndex].welcomeChinese}}</text>
+              </view>
+            </view>
+          </view>
+        </view>
+      </block>
+
+      <view id="conversation-bottom" />
+    </view>
+  </scroll-view>
+
+  <!-- 底部输入区域 -->
+  <view class="footer">
+    <!-- 错误提示 -->
+    <view class="error-tip" wx:if="{{error}}">
+      <text>{{error}}</text>
+    </view>
+
+    <!-- 文字输入框 -->
+    <view class="input-bar {{isLoading || isSpeaking ? 'disabled' : ''}}">
+      <input class="text-input" type="text" placeholder="Type in English or Chinese..."
+        placeholder-class="input-placeholder" value="{{inputText}}"
+        bindinput="onInputChange" bindconfirm="onSendText"
+        disabled="{{isLoading || isSpeaking}}" confirm-type="send" />
+      <button class="send-button {{inputText.trim() ? 'active' : ''}}"
+        bindtap="onSendText" disabled="{{!inputText.trim() || isLoading || isSpeaking}}">
+        <view class="send-icon">
+          <svg viewBox="0 0 24 24" fill="currentColor">
+            <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
+          </svg>
+        </view>
+      </button>
+    </view>
+
+    <!-- 加载/说话提示 -->
+    <text class="footer-hint" wx:if="{{isLoading}}">Thinking...</text>
+    <text class="footer-hint" wx:elif="{{isSpeaking}}">Speaking...</text>
+  </view>
+
+  <!-- 单词详情弹窗 -->
+  <view class="word-popup-overlay {{showWordPopup ? 'active' : ''}}" bindtap="onCloseWordPopup">
+    <view class="word-popup {{showWordPopup ? 'active' : ''}}" catchtap="noop">
+      <view wx:if="{{wordLoading}}" class="word-popup-loading">
+        <text class="word-popup-loading-text">Loading...</text>
+      </view>
+      <view wx:elif="{{wordInfo}}" class="word-popup-content">
+        <view class="word-popup-header">
+          <text class="word-popup-word">{{wordInfo.word}}</text>
+          <text class="word-popup-phonetic" wx:if="{{wordInfo.phonetic}}" bindtap="playWordSound">{{wordInfo.phonetic}}</text>
+          <view class="word-popup-speaker" bindtap="playWordSound">
+            <text class="word-popup-speaker-icon">🔊</text>
+          </view>
+        </view>
+        <text class="word-popup-chinese" wx:if="{{wordInfo.chinese}}">{{wordInfo.chinese}}</text>
+        <view class="word-popup-meanings">
+          <view class="word-popup-meaning" wx:for="{{wordInfo.meanings}}" wx:key="index">
+            <text class="word-popup-pos">{{item.partOfSpeech}}</text>
+            <text class="word-popup-def">{{item.definition}}</text>
+            <text class="word-popup-example" wx:if="{{item.example}}">"{{item.example}}"</text>
+          </view>
+        </view>
+      </view>
+      <view class="word-popup-close" bindtap="onCloseWordPopup">
+        <text class="word-popup-close-btn">✕</text>
+      </view>
+    </view>
+  </view>
+</view>

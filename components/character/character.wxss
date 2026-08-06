@@ -1,0 +1,434 @@
+/* ═══════════════════════════════════════
+   动画角色组件样式
+   ═══════════════════════════════════════ */
+
+.character-container {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  width: 360rpx;
+  height: 360rpx;
+}
+
+/* 发光背景 */
+.character-glow-bg {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  transition: all 0.7s ease;
+}
+.character-glow-bg.idle {
+  background: rgba(142, 142, 147, 0.08);
+}
+.character-glow-bg.listening {
+  background: rgba(0, 122, 255, 0.12);
+  animation: pulse-glow 2s ease-in-out infinite;
+}
+.character-glow-bg.speaking {
+  background: rgba(52, 199, 89, 0.12);
+  animation: pulse-glow 2s ease-in-out infinite;
+}
+.character-glow-bg.thinking {
+  background: rgba(255, 149, 0, 0.1);
+}
+.character-glow-bg.correcting {
+  background: rgba(175, 82, 222, 0.1);
+}
+.character-glow-bg.happy {
+  background: rgba(255, 204, 0, 0.12);
+  animation: pulse-glow 2s ease-in-out infinite;
+}
+
+/* 角色主体 */
+.character-body {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.character-body.idle,
+.character-body.listening {
+  animation: float 3s ease-in-out infinite;
+}
+.character-body.happy {
+  animation: bounce-gentle 0.6s ease-in-out infinite;
+}
+
+/* 身体 */
+.char-body-shape {
+  width: 180rpx;
+  height: 120rpx;
+  background: var(--apple-gray5);
+  border-radius: 50%;
+  position: absolute;
+  bottom: -20rpx;
+}
+@media (prefers-color-scheme: dark) {
+  .char-body-shape {
+    background: #3a3a3c;
+  }
+}
+
+/* 头部 */
+.char-head {
+  width: 200rpx;
+  height: 200rpx;
+  position: relative;
+}
+
+/* 脸部 */
+.char-face {
+  width: 200rpx;
+  height: 200rpx;
+  background: var(--apple-gray6);
+  border-radius: 50%;
+  border: 2rpx solid var(--apple-gray5);
+  position: absolute;
+  top: 0;
+  left: 0;
+  overflow: visible;
+}
+@media (prefers-color-scheme: dark) {
+  .char-face {
+    background: #2c2c2e;
+    border-color: #3a3a3c;
+  }
+}
+
+/* 耳朵 */
+.char-ear {
+  position: absolute;
+  width: 32rpx;
+  height: 48rpx;
+  background: var(--apple-gray6);
+  border-radius: 50%;
+  border: 2rpx solid var(--apple-gray5);
+  top: 100rpx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+@media (prefers-color-scheme: dark) {
+  .char-ear {
+    background: #2c2c2e;
+    border-color: #3a3a3c;
+  }
+}
+.char-ear-left {
+  left: -16rpx;
+}
+.char-ear-right {
+  right: -16rpx;
+}
+.char-ear-inner {
+  width: 16rpx;
+  height: 24rpx;
+  background: var(--apple-gray5);
+  border-radius: 50%;
+}
+@media (prefers-color-scheme: dark) {
+  .char-ear-inner {
+    background: #3a3a3c;
+  }
+}
+.char-ear.listening {
+  animation: wave 1.5s ease-in-out infinite;
+  transform-origin: center;
+}
+.char-ear-right.listening {
+  animation: wave 1.5s ease-in-out infinite 0.2s;
+  transform-origin: center;
+}
+
+/* 眼睛 */
+.char-eye {
+  position: absolute;
+  top: 100rpx;
+}
+.char-eye-left {
+  left: 50rpx;
+}
+.char-eye-right {
+  right: 50rpx;
+}
+.char-eye-white {
+  width: 36rpx;
+  height: 40rpx;
+  background: white;
+  border-radius: 50%;
+  border: 1rpx solid var(--apple-gray3);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform 0.1s;
+}
+.char-eye-pupil {
+  width: 20rpx;
+  height: 20rpx;
+  background: var(--foreground);
+  border-radius: 50%;
+  position: relative;
+  transition: transform 0.3s ease-out;
+}
+.char-eye-highlight {
+  width: 8rpx;
+  height: 8rpx;
+  background: white;
+  border-radius: 50%;
+  position: absolute;
+  top: 3rpx;
+  right: 3rpx;
+  opacity: 0.8;
+}
+
+/* 眨眼动画 */
+.char-eye-white.blink {
+  transform: scaleY(0.1);
+}
+
+/* 眉毛 */
+.char-eyebrow {
+  position: absolute;
+  width: 40rpx;
+  height: 4rpx;
+  background: var(--apple-gray);
+  border-radius: 2rpx;
+  top: 82rpx;
+  transition: all 0.3s;
+}
+.char-eyebrow-left {
+  left: 48rpx;
+  transform-origin: left center;
+}
+.char-eyebrow-right {
+  right: 48rpx;
+  transform-origin: right center;
+}
+/* 纠正时的眉毛 */
+.char-eyebrow-left.correcting {
+  background: var(--apple-orange);
+  transform: rotate(-8deg);
+}
+.char-eyebrow-right.correcting {
+  background: var(--apple-orange);
+  transform: rotate(8deg);
+}
+/* 思考时的眉毛 */
+.char-eyebrow-left.thinking {
+  transform: rotate(-5deg) translateY(-4rpx);
+}
+.char-eyebrow-right.thinking {
+  transform: rotate(5deg) translateY(-4rpx);
+}
+
+/* 腮红 */
+.char-blush {
+  position: absolute;
+  width: 32rpx;
+  height: 16rpx;
+  background: var(--apple-red);
+  border-radius: 50%;
+  opacity: 0;
+  transition: opacity 0.3s;
+}
+.char-blush-left {
+  left: 28rpx;
+  top: 130rpx;
+}
+.char-blush-right {
+  right: 28rpx;
+  top: 130rpx;
+}
+.char-blush.happy,
+.char-blush.correcting {
+  opacity: 0.25;
+}
+
+/* 嘴巴 */
+.char-mouth {
+  position: absolute;
+  bottom: 44rpx;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 48rpx;
+  height: 24rpx;
+}
+.char-mouth-shape {
+  width: 100%;
+  height: 100%;
+  transition: all 0.2s;
+}
+/* 微笑 */
+.char-mouth-shape.idle {
+  width: 28rpx;
+  height: 12rpx;
+  border-bottom: 4rpx solid var(--foreground);
+  border-radius: 0 0 50% 50%;
+}
+/* 开心微笑 */
+.char-mouth-shape.happy {
+  width: 40rpx;
+  height: 24rpx;
+  border-bottom: 4rpx solid var(--foreground);
+  border-radius: 0 0 50% 50%;
+}
+/* 说话 */
+.char-mouth-shape.speaking {
+  width: 28rpx;
+  height: 16rpx;
+  background: var(--foreground);
+  border-radius: 50%;
+  animation: speak-mouth 0.3s ease-in-out infinite alternate;
+}
+/* 纠正 - 微张嘴 */
+.char-mouth-shape.correcting {
+  width: 20rpx;
+  height: 12rpx;
+  background: var(--foreground);
+  border-radius: 50%;
+}
+/* 思考 - 小张嘴 */
+.char-mouth-shape.thinking {
+  width: 16rpx;
+  height: 8rpx;
+  background: var(--foreground);
+  border-radius: 50%;
+}
+
+/* 手臂 */
+.char-arm {
+  position: absolute;
+  width: 16rpx;
+  height: 60rpx;
+  background: var(--apple-gray4);
+  border-radius: 8rpx;
+  bottom: 40rpx;
+  opacity: 0;
+  transition: opacity 0.3s;
+}
+@media (prefers-color-scheme: dark) {
+  .char-arm {
+    background: #48484a;
+  }
+}
+.char-arm-left {
+  left: 10rpx;
+  transform: rotate(20deg);
+}
+.char-arm-right {
+  right: 10rpx;
+  transform: rotate(-20deg);
+}
+.char-arm.correcting {
+  opacity: 1;
+}
+
+/* 思考气泡 */
+.char-thought-bubbles {
+  position: absolute;
+  top: 20rpx;
+  right: 20rpx;
+  opacity: 0;
+  transition: opacity 0.3s;
+}
+.char-thought-bubbles.thinking {
+  opacity: 1;
+}
+.bubble {
+  background: var(--apple-gray3);
+  border-radius: 50%;
+  position: absolute;
+}
+.bubble-1 {
+  width: 12rpx;
+  height: 12rpx;
+  top: 0;
+  right: 0;
+}
+.bubble-2 {
+  width: 16rpx;
+  height: 16rpx;
+  top: -18rpx;
+  right: 8rpx;
+}
+.bubble-3 {
+  width: 28rpx;
+  height: 28rpx;
+  top: -40rpx;
+  right: 16rpx;
+}
+
+/* 星星 */
+.char-sparkles {
+  position: absolute;
+  top: 10rpx;
+  opacity: 0;
+  transition: opacity 0.3s;
+}
+.char-sparkles.happy {
+  opacity: 1;
+  animation: fade-in 0.3s ease-out;
+}
+.sparkle {
+  font-size: 32rpx;
+  color: var(--apple-yellow);
+  position: absolute;
+}
+.sparkle-1 {
+  left: -60rpx;
+  top: 0;
+}
+.sparkle-2 {
+  right: -60rpx;
+  top: 10rpx;
+  font-size: 24rpx;
+}
+
+/* 状态文字 */
+.char-state-label {
+  position: absolute;
+  bottom: -40rpx;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 22rpx;
+  font-weight: 500;
+  opacity: 0;
+  transition: all 0.3s;
+}
+.char-state-label.listening {
+  opacity: 1;
+  color: var(--apple-blue);
+}
+.char-state-label.speaking {
+  opacity: 1;
+  color: var(--apple-green);
+}
+.char-state-label.thinking {
+  opacity: 1;
+  color: var(--apple-orange);
+}
+.char-state-label.happy {
+  opacity: 1;
+  color: var(--apple-yellow);
+}
+.char-state-label.correcting {
+  opacity: 1;
+  color: var(--apple-purple);
+}
+
+/* 动画关键帧 */
+@keyframes wave {
+  0%, 100% { transform: rotate(0deg); }
+  25% { transform: rotate(6deg); }
+  75% { transform: rotate(-6deg); }
+}
+@keyframes speak-mouth {
+  0% { transform: scaleY(0.3); }
+  100% { transform: scaleY(1); }
+}

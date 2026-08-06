@@ -1,0 +1,7 @@
+{
+  "usingComponents": {
+    "character": "../../components/character/character"
+  },
+  "navigationStyle": "custom",
+  "disableScroll": true
+}

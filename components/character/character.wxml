@@ -1,0 +1,78 @@
+<!-- 动画角色组件 -->
+<view class="character-container">
+  <!-- 发光背景 -->
+  <view class="character-glow-bg {{state}}" />
+
+  <!-- 角色主体 -->
+  <view class="character-body {{state}}">
+    <!-- 身体 -->
+    <view class="char-body-shape" />
+
+    <!-- 头部 -->
+    <view class="char-head">
+      <!-- 左耳 -->
+      <view class="char-ear char-ear-left {{state}}">
+        <view class="char-ear-inner" />
+      </view>
+      <!-- 右耳 -->
+      <view class="char-ear char-ear-right {{state}}">
+        <view class="char-ear-inner" />
+      </view>
+
+      <!-- 脸部 -->
+      <view class="char-face">
+        <!-- 左眼 -->
+        <view class="char-eye char-eye-left">
+          <view class="char-eye-white">
+            <view class="char-eye-pupil">
+              <view class="char-eye-highlight" />
+            </view>
+          </view>
+        </view>
+        <!-- 右眼 -->
+        <view class="char-eye char-eye-right">
+          <view class="char-eye-white">
+            <view class="char-eye-pupil">
+              <view class="char-eye-highlight" />
+            </view>
+          </view>
+        </view>
+
+        <!-- 眉毛 -->
+        <view class="char-eyebrow char-eyebrow-left {{state}}" />
+        <view class="char-eyebrow char-eyebrow-right {{state}}" />
+
+        <!-- 腮红 -->
+        <view class="char-blush char-blush-left {{state}}" />
+        <view class="char-blush char-blush-right {{state}}" />
+
+        <!-- 嘴巴 -->
+        <view class="char-mouth {{state}}">
+          <view class="char-mouth-shape {{state}}" />
+        </view>
+      </view>
+    </view>
+
+    <!-- 手臂（纠正时显示） -->
+    <view class="char-arm char-arm-left {{state}}" />
+    <view class="char-arm char-arm-right {{state}}" />
+  </view>
+
+  <!-- 思考气泡 -->
+  <view class="char-thought-bubbles {{state}}">
+    <view class="bubble bubble-1" />
+    <view class="bubble bubble-2" />
+    <view class="bubble bubble-3" />
+  </view>
+
+  <!-- 星星（开心时） -->
+  <view class="char-sparkles {{state}}">
+    <text class="sparkle sparkle-1">✦</text>
+    <text class="sparkle sparkle-2">✦</text>
+  </view>
+
+  <!-- 状态文字 -->
+  <view class="char-state-label {{state}}">
+    <text>{{stateText}}</text>
+  </view>
+</view>
