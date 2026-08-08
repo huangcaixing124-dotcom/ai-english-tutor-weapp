@@ -1,0 +1,11 @@
+.lottie-character {
+  width: 180px;
+  height: 180px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.char-canvas {
+  width: 180px !important;
+  height: 180px !important;
+}

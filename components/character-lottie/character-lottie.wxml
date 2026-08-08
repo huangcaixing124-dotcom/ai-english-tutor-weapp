@@ -1,0 +1,5 @@
+<!-- Lottie 动画角色 -->
+<view class="lottie-character">
+  <canvas id="charCanvas" class="char-canvas" type="2d"
+    style="width: {{canvasWidth}}px; height: {{canvasHeight}}px;"></canvas>
+</view>

@@ -9,6 +9,16 @@ const CHARACTER_STATES = {
   HAPPY: 'happy',
 };
 
+// 氛围光颜色映射（状态 → 背景渐变色）
+const AMBIENT_COLORS = {
+  idle: 'rgba(0, 122, 255, 0.25)',
+  listening: 'rgba(90, 200, 250, 0.28)',
+  thinking: 'rgba(255, 149, 0, 0.28)',
+  speaking: 'rgba(52, 199, 89, 0.28)',
+  happy: 'rgba(255, 214, 10, 0.28)',
+  correcting: 'rgba(175, 82, 222, 0.28)',
+};
+
 const SCENARIOS = [
   {
     id: 'free', label: '💬 Free Talk', labelCn: '自由对话',
@@ -146,10 +156,13 @@ Page({
     scenarioHistory: {}, // 所有场景的对话记录
     showWelcome: true, // 是否显示欢迎语
     activeUserVoiceIndex: -1, // 正在播放的用户语音索引
+    scrollTarget: 'conversation-bottom', // 自动滚动目标
     // 通话模式
     conversationMode: 'press', // 'press'(按说) | 'call'(通话)
     isCallActive: false,      // 通话是否进行中
     callStatus: 'idle',       // idle|listening|processing
+    // 氛围光背景
+    ambientStyle: 'background: radial-gradient(ellipse at 50% 0%, rgba(0,122,255,0.12), transparent 65%);',
   },
 
   audioContext: null,
@@ -181,9 +194,9 @@ Page({
 
       this.setData({ isSpeaking: false });
       this.stopPlayAnimation();
-      this.setData({ characterState: CHARACTER_STATES.HAPPY });
+      this.setData({ characterState: CHARACTER_STATES.HAPPY }, () => this._syncAmbient());
       setTimeout(() => {
-        this.setData({ characterState: CHARACTER_STATES.IDLE });
+        this.setData({ characterState: CHARACTER_STATES.IDLE }, () => this._syncAmbient());
       }, 2000);
 
       // 通话模式：AI 播完后继续监听
@@ -220,7 +233,7 @@ Page({
         isRecording: false,
         error: '录音失败，请检查麦克风权限',
         characterState: CHARACTER_STATES.IDLE,
-      });
+      }, () => this._syncAmbient());
       this.stopRecordAnimation();
     });
 
@@ -232,6 +245,7 @@ Page({
 
     // 恢复当前场景的对话
     this.loadScenarioConversation(0);
+    this._syncAmbient();
   },
 
   onUnload() {
@@ -266,6 +280,7 @@ Page({
       displayTurns: history,
       showWelcome: history.length === 0,
     });
+    this._scrollToBottom();
 
     if (history.length > 0) {
       const last = history[history.length - 1];
@@ -296,7 +311,7 @@ Page({
       isLoading: false,
       isSpeaking: false,
       characterState: CHARACTER_STATES.IDLE,
-    });
+    }, () => this._syncAmbient());
 
     this.loadScenarioConversation(index);
 
@@ -356,7 +371,7 @@ Page({
       callStatus: 'listening',
       error: '',
       characterState: CHARACTER_STATES.LISTENING,
-    });
+    }, () => this._syncAmbient());
     this._callModeActive = true;
     this._callListening = true;
     this._callSpeechFrames = [];
@@ -395,7 +410,7 @@ Page({
       isLoading: false,
       isSpeaking: false,
       characterState: CHARACTER_STATES.IDLE,
-    });
+    }, () => this._syncAmbient());
     this.stopPlayAnimation();
     this.stopRecordAnimation();
   },
@@ -405,7 +420,7 @@ Page({
     this._callListening = true;
     this._callSpeechFrames = [];
     this._callSilenceCount = 0;
-    this.setData({ callStatus: 'listening', characterState: CHARACTER_STATES.LISTENING });
+    this.setData({ callStatus: 'listening', characterState: CHARACTER_STATES.LISTENING }, () => this._syncAmbient());
     this.startCallRecording();
   },
 
@@ -433,7 +448,7 @@ Page({
       } else if (this._callSpeechFrames.length > 0) {
         this._callSilenceCount++;
         if (this._callSilenceCount >= VAD_SILENCE_FRAMES) {
-          // 静音够久，该轮说话结束——停止录音，触发 onStop 处理
+          // 该轮说话结束——停止录音，触发 onStop 处理
           this._callListening = false;
           this.recorderManager.stop();
         }
@@ -448,7 +463,7 @@ Page({
     try {
       if (!frames || frames.length < VAD_MIN_SPEECH_FRAMES) {
         // 太短，忽略，继续监听
-        this.setData({ callStatus: 'listening', characterState: CHARACTER_STATES.LISTENING });
+        this.setData({ callStatus: 'listening', characterState: CHARACTER_STATES.LISTENING }, () => this._syncAmbient());
         this.resumeCallListen();
         return;
       }
@@ -497,7 +512,7 @@ Page({
       isRecording: true,
       error: '',
       characterState: CHARACTER_STATES.LISTENING,
-    });
+    }, () => this._syncAmbient());
     this.startRecordAnimation();
 
     try {
@@ -550,6 +565,9 @@ Page({
       isLoading: true,
       characterState: CHARACTER_STATES.THINKING,
       callStatus: this.data.isCallActive ? 'processing' : this.data.callStatus,
+    }, () => {
+      this._syncAmbient();
+      this._scrollToBottom();
     });
 
     try {
@@ -594,6 +612,9 @@ Page({
         displayTurns: finalHistory, isLoading: false,
         characterState: CHARACTER_STATES.SPEAKING,
         callStatus: this.data.isCallActive ? 'speaking' : this.data.callStatus,
+      }, () => {
+        this._syncAmbient();
+        this._scrollToBottom();
       });
       this.saveScenarioHistory();
 
@@ -623,7 +644,7 @@ Page({
         displayTurns: errHistory, isLoading: false,
         characterState: CHARACTER_STATES.IDLE, error: '语音处理失败，请重试',
         callStatus: this.data.isCallActive ? 'listening' : this.data.callStatus,
-      });
+      }, () => this._syncAmbient());
       if (this.data.isCallActive) this.resumeCallListen();
     }
   },
@@ -686,6 +707,9 @@ Page({
         characterState: result.correction
           ? CHARACTER_STATES.CORRECTING
           : CHARACTER_STATES.HAPPY,
+      }, () => {
+        this._syncAmbient();
+        this._scrollToBottom();
       });
       this.updateWordTokens(turn.ai.english);
       this.saveScenarioHistory();
@@ -698,7 +722,7 @@ Page({
         isLoading: false,
         characterState: CHARACTER_STATES.IDLE,
         error: 'Network error. Please try again.',
-      });
+      }, () => this._syncAmbient());
     }
   },
 
@@ -707,7 +731,7 @@ Page({
   // ═══════════════════════════════════════
 
   playTTS(text) {
-    this.setData({ isSpeaking: true, characterState: CHARACTER_STATES.SPEAKING });
+    this.setData({ isSpeaking: true, characterState: CHARACTER_STATES.SPEAKING }, () => this._syncAmbient());
     this.startPlayAnimation();
 
     API.getTTSAudio(text)
@@ -720,10 +744,10 @@ Page({
         this.setData({
           isSpeaking: false,
           characterState: CHARACTER_STATES.HAPPY,
-        });
+        }, () => this._syncAmbient());
         this.stopPlayAnimation();
         setTimeout(() => {
-          this.setData({ characterState: CHARACTER_STATES.IDLE });
+          this.setData({ characterState: CHARACTER_STATES.IDLE }, () => this._syncAmbient());
         }, 2000);
       });
   },
@@ -783,6 +807,23 @@ Page({
   },
 
   noop() {},
+
+  // 滚动到对话底部
+  _scrollToBottom() {
+    this.setData({ scrollTarget: '' });
+    setTimeout(() => {
+      this.setData({ scrollTarget: 'conversation-bottom' });
+    }, 50);
+  },
+
+  // 同步氛围光背景
+  _syncAmbient() {
+    const state = this.data.characterState;
+    const color = AMBIENT_COLORS[state] || AMBIENT_COLORS.idle;
+    this.setData({
+      ambientStyle: `background: radial-gradient(ellipse at 50% 30%, ${color}, transparent 75%);`,
+    });
+  },
 
   // 播放历史语音消息
   playVoiceMessage(e) {

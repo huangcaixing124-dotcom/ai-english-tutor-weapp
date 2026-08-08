@@ -1,7 +1,5 @@
 {
-  "usingComponents": {
-    "character": "../../components/character/character"
-  },
+  "usingComponents": {},
   "navigationStyle": "custom",
   "disableScroll": true
 }

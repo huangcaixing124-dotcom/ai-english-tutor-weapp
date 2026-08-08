@@ -49,19 +49,12 @@
     </view>
   </view>
 
-  <!-- 角色区域 -->
-  <view class="character-section">
-    <character state="{{characterState}}" />
-    <!-- TTS 播放声波动画 -->
-    <view class="voice-indicator {{isSpeaking ? 'active' : ''}}">
-      <view class="voice-bar voice-bar-green" wx:for="{{10}}" wx:key="index"
-        style="background: var(--apple-green);" />
-    </view>
-  </view>
+  <!-- 氛围光背景 -->
+  <view class="ambient-bg" style="{{ambientStyle}}"></view>
 
   <!-- 对话展示区 -->
   <scroll-view class="conversation-section" scroll-y="true" scroll-with-animation="true"
-    scroll-into-view="conversation-bottom">
+    scroll-into-view="{{scrollTarget}}">
     <view class="conversation-list">
       <!-- 对话历史（遍历展示） -->
       <block wx:for="{{displayTurns}}" wx:key="index">
@@ -214,7 +207,16 @@
       <view class="voice-input-group {{isLoading || isSpeaking ? 'disabled' : ''}}">
         <button class="record-button {{isRecording ? 'recording' : ''}}"
           bindtap="onToggleRecord" disabled="{{isLoading || isSpeaking}}">
-          <text class="record-icon">{{isRecording ? '■' : '🎤'}}</text>
+          <view class="record-icon-wrap">
+            <view wx:if="{{!isRecording}}" class="mic-icon">
+              <view class="mic-body"></view>
+              <view class="mic-stem"></view>
+              <view class="mic-base"></view>
+            </view>
+            <view wx:else class="recording-icon">
+              <view class="recording-dot"></view>
+            </view>
+          </view>
         </button>
         <text class="record-hint">{{isRecording ? 'Release to send' : 'Tap to speak'}}</text>
       </view>
@@ -230,7 +232,10 @@
         <!-- 未通话 -->
         <view class="call-start-area">
           <button class="call-start-button" bindtap="startCall">
-            <text class="call-start-icon">📞</text>
+            <view class="call-icon">
+              <view class="call-icon-handset"></view>
+              <view class="call-icon-base"></view>
+            </view>
           </button>
           <text class="record-hint">Start a call conversation</text>
         </view>
@@ -244,7 +249,9 @@
             <text wx:elif="{{callStatus === 'speaking'}}">Speaking...</text>
           </view>
           <button class="call-end-button" bindtap="endCall">
-            <text class="call-end-icon">■</text>
+            <view class="call-end-icon">
+              <view class="end-square"></view>
+            </view>
           </button>
           <text class="record-hint">Tap to end call</text>
         </view>
