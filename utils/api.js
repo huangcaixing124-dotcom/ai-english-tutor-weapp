@@ -56,32 +56,19 @@ function sendAudioForSTT(tempFilePath) {
 /**
  * 语音合成 API
  * 传入文字，返回临时音频文件路径
+ * 使用 wx.downloadFile 下载音频文件到临时目录
  */
 function getTTSAudio(text) {
   return new Promise((resolve, reject) => {
-    wx.request({
-      url: CONFIG.apiBaseUrl + CONFIG.ttsApi,
-      method: 'POST',
-      data: { text },
+    const url = CONFIG.apiBaseUrl + CONFIG.ttsApi + '?text=' + encodeURIComponent(text);
+    wx.downloadFile({
+      url: url,
       header: { 'content-type': 'application/json' },
-      responseType: 'arraybuffer',
       success(res) {
-        if (res.statusCode === 200) {
-          // 将音频数据写入临时文件
-          const fs = wx.getFileSystemManager();
-          const tempPath = `${wx.env.USER_DATA_PATH}/tts_${Date.now()}.mp3`;
-          fs.writeFile({
-            filePath: tempPath,
-            data: res.data,
-            success() {
-              resolve(tempPath);
-            },
-            fail() {
-              reject(new Error('Failed to save audio file'));
-            },
-          });
+        if (res.statusCode === 200 && res.tempFilePath) {
+          resolve(res.tempFilePath);
         } else {
-          reject(new Error('TTS API error: ' + res.statusCode));
+          reject(new Error('TTS download error: ' + res.statusCode));
         }
       },
       fail(err) {
@@ -95,8 +82,63 @@ module.exports = {
   sendChat,
   sendAudioForSTT,
   getTTSAudio,
+  sendVoiceForChat,
   lookupWord,
 };
+
+/**
+ * 语音对话 API（语音进 → 语音出）
+ * 上传音频，返回 AI 语音音频 + 文本信息
+ * 返回：{ audioPath, userText, aiEnglish, aiChinese, aiCorrection }
+ */
+function sendVoiceForChat(tempFilePath, scenario, difficulty, history) {
+  return new Promise((resolve, reject) => {
+    const formData = { scenario, difficulty };
+    if (history && history.length > 0) {
+      formData.history = JSON.stringify(history);
+    }
+    wx.uploadFile({
+      url: CONFIG.apiBaseUrl + '/api/voice',
+      filePath: tempFilePath,
+      name: 'audio',
+      formData: formData,
+      success(res) {
+        try {
+          const data = JSON.parse(res.data);
+          if (data.error) {
+            reject(new Error(data.error));
+            return;
+          }
+          // data.audio 是 base64 编码的 MP3
+          const fs = wx.getFileSystemManager();
+          const tempPath = `${wx.env.USER_DATA_PATH}/voice_${Date.now()}.mp3`;
+          const audioBuffer = wx.base64ToArrayBuffer(data.audio);
+          fs.writeFile({
+            filePath: tempPath,
+            data: audioBuffer,
+            success() {
+              resolve({
+                audioPath: tempPath,
+                userText: data.userText || '',
+                aiEnglish: data.aiEnglish || '',
+                aiChinese: data.aiChinese || '',
+                aiCorrection: data.aiCorrection || '',
+              });
+            },
+            fail() {
+              reject(new Error('Failed to save audio'));
+            },
+          });
+        } catch (err) {
+          reject(new Error('Voice API parse error'));
+        }
+      },
+      fail(err) {
+        reject(err);
+      },
+    });
+  });
+}
 
 /**
  * 单词查询 API

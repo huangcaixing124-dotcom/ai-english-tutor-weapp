@@ -7,11 +7,10 @@ const CONFIG = {
   projectName: 'ai-english-tutor',
 
   // API 地址
-  // 开发者工具模拟器用 localhost；真机预览用局域网 IP
-  apiBaseUrl: 'http://localhost:3001',
+  apiBaseUrl: 'https://english.hcxserver.xyz',
 
   // 开发模式
-  isDev: true,
+  isDev: false,
 
   // AI 对话 API
   chatApi: '/api/chat',
@@ -25,7 +24,7 @@ const CONFIG = {
 
 // 自动切换开发/生产地址
 if (CONFIG.isDev) {
-  CONFIG.apiBaseUrl = 'http://localhost:3001';
+  CONFIG.apiBaseUrl = 'http://localhost:3002';
 }
 
 module.exports = CONFIG;

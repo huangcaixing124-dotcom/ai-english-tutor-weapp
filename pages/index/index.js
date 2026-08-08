@@ -12,13 +12,13 @@ const CHARACTER_STATES = {
 const SCENARIOS = [
   {
     id: 'free', label: '💬 Free Talk', labelCn: '自由对话',
-    welcomeEnglish: "Hi there! I'm your AI English tutor. You can type in English or Chinese — I'll understand both and help you practice. What would you like to talk about today?",
-    welcomeChinese: '你好！我是你的 AI 英语口语教练。你可以用中文或英文输入，我都能理解。今天想聊什么？',
+    welcomeEnglish: "Hi there! I'm your AI English tutor. Tap the microphone button and start speaking — I understand both English and Chinese!",
+    welcomeChinese: '你好！我是你的 AI 英语口语教练。点击麦克风按钮开始说话吧——中英文都可以！',
   },
   {
     id: 'restaurant', label: '🍽️ Restaurant', labelCn: '餐厅',
-    welcomeEnglish: "Welcome to our restaurant! I'll be your waiter today. Would you like to see the menu or would you like me to recommend today's specials?",
-    welcomeChinese: '欢迎来到我们的餐厅！今天我是你的服务员。你想看看菜单，还是让我推荐今日特色菜？',
+    welcomeEnglish: "Welcome to our restaurant! I'll be your waiter today. Just tap the mic and tell me what you'd like to order!",
+    welcomeChinese: '欢迎来到我们的餐厅！今天我是你的服务员。点击麦克风告诉我你想点什么！',
   },
   {
     id: 'interview', label: '💼 Interview', labelCn: '面试',
@@ -48,16 +48,87 @@ const DIFFICULTIES = [
   { id: 'advanced', label: '🔴 Advanced', labelCn: '高级' },
 ];
 
+// ═══════ 通话模式 VAD 常量 ═══════
+// 录音参数：format=pcm, sampleRate=16000, mono, frameSize=1KB
+// 每帧 = 4KB = 2048 个 16-bit 采样 = 128ms
+const VAD_SPEECH_THRESHOLD = 640000;   // 能量阈值（RMS 800 的平方）
+const VAD_SILENCE_FRAMES = 6;       // 连续静音 6 帧 ≈ 768ms 判定句末
+const VAD_MIN_SPEECH_FRAMES = 3;    // 最短说话 3 帧 ≈ 384ms，以下忽略
+const VAD_MAX_SPEECH_FRAMES = 156;  // 单段上限 156 帧 ≈ 20 秒，防内存溢出
+
+// 计算 16-bit PCM 帧的能量（平方均值，避免 Math.sqrt 开销）
+function calcEnergy(arrayBuffer) {
+  if (!arrayBuffer || !arrayBuffer.byteLength) return 0;
+  const data = new Int16Array(arrayBuffer);
+  let sum = 0;
+  for (let i = 0; i < data.length; i++) {
+    sum += data[i] * data[i];
+  }
+  return sum / (data.length || 1);
+}
+
+// 拼接多个 ArrayBuffer
+function concatArrayBuffers(buffers) {
+  if (!buffers || buffers.length === 0) return new ArrayBuffer(0);
+  const validBuffers = buffers.filter(b => b && b.byteLength > 0);
+  if (validBuffers.length === 0) return new ArrayBuffer(0);
+  const totalLength = validBuffers.reduce((acc, b) => acc + b.byteLength, 0);
+  const result = new Uint8Array(totalLength);
+  let offset = 0;
+  for (const b of validBuffers) {
+    result.set(new Uint8Array(b), offset);
+    offset += b.byteLength;
+  }
+  return result.buffer;
+}
+
+// 16-bit PCM 转 WAV（加 44 字节头）
+function encodeWAV(pcmBuffer, sampleRate, numChannels) {
+  if (!pcmBuffer || !pcmBuffer.byteLength) {
+    pcmBuffer = new ArrayBuffer(0);
+  }
+  const bitsPerSample = 16;
+  const byteRate = (sampleRate * numChannels * bitsPerSample) / 8;
+  const blockAlign = (numChannels * bitsPerSample) / 8;
+  const dataSize = pcmBuffer.byteLength;
+  const buffer = new ArrayBuffer(44 + dataSize);
+  const view = new DataView(buffer);
+
+  const writeString = (offset, str) => {
+    for (let i = 0; i < str.length; i++) {
+      view.setUint8(offset + i, str.charCodeAt(i));
+    }
+  };
+
+  writeString(0, 'RIFF');
+  view.setUint32(4, 36 + dataSize, true);
+  writeString(8, 'WAVE');
+  writeString(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true); // PCM
+  view.setUint16(22, numChannels, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, byteRate, true);
+  view.setUint16(32, blockAlign, true);
+  view.setUint16(34, bitsPerSample, true);
+  writeString(36, 'data');
+  view.setUint32(40, dataSize, true);
+
+  new Uint8Array(buffer, 44).set(new Uint8Array(pcmBuffer));
+  return buffer;
+}
+
 Page({
   data: {
     statusBarHeight: 44,
     characterState: CHARACTER_STATES.IDLE,
     isLoading: false,
     isSpeaking: false,
-    inputText: '',
+    isRecording: false,
     userTranscript: '',
     error: '',
-    playBarHeights: [8, 12, 8, 16, 10],
+    playBarHeights: [8, 12, 8, 16, 10, 8, 12, 8, 16, 10],
+    recordBarHeights: [8, 12, 8, 16, 10, 8, 12, 8, 16, 10],
     // 场景和难度
     scenarios: SCENARIOS,
     difficulties: DIFFICULTIES,
@@ -74,10 +145,23 @@ Page({
     displayTurns: [], // 当前场景的完整对话
     scenarioHistory: {}, // 所有场景的对话记录
     showWelcome: true, // 是否显示欢迎语
+    activeUserVoiceIndex: -1, // 正在播放的用户语音索引
+    // 通话模式
+    conversationMode: 'press', // 'press'(按说) | 'call'(通话)
+    isCallActive: false,      // 通话是否进行中
+    callStatus: 'idle',       // idle|listening|processing
   },
 
   audioContext: null,
+  recorderManager: null,
   playTimer: null,
+  recordTimer: null,
+  // 通话模式状态
+  _callModeActive: false,
+  _callListening: false,
+  _callSpeechFrames: [],
+  _callSilenceCount: 0,
+  _callModeRecording: false, // 当前录音会话是否为通话模式（PCM）
 
   onLoad() {
     const app = getApp();
@@ -86,19 +170,58 @@ Page({
     });
 
     this.audioContext = wx.createInnerAudioContext();
+    this.recorderManager = wx.getRecorderManager();
 
     this.audioContext.onEnded(() => {
+      if (this._isUserVoicePlay) {
+        this._isUserVoicePlay = false;
+        this.setData({ activeUserVoiceIndex: -1 });
+        return;
+      }
+
       this.setData({ isSpeaking: false });
       this.stopPlayAnimation();
       this.setData({ characterState: CHARACTER_STATES.HAPPY });
       setTimeout(() => {
         this.setData({ characterState: CHARACTER_STATES.IDLE });
       }, 2000);
+
+      // 通话模式：AI 播完后继续监听
+      if (this.data.isCallActive) {
+        this.resumeCallListen();
+      }
     });
 
     this.audioContext.onError(() => {
       this.setData({ isSpeaking: false });
       this.stopPlayAnimation();
+    });
+
+    // 录音完成回调
+    this.recorderManager.onStop((res) => {
+      this.setData({ isRecording: false });
+      this.stopRecordAnimation();
+
+      // 通话模式：处理说话段
+      if (this._callModeRecording) {
+        this._callModeRecording = false;
+        const frames = this._callSpeechFrames;
+        this._callSpeechFrames = [];
+        this.processCallUtterance(frames);
+        return;
+      }
+
+      // 按说模式
+      this.handleVoiceInput(res.tempFilePath);
+    });
+
+    this.recorderManager.onError(() => {
+      this.setData({
+        isRecording: false,
+        error: '录音失败，请检查麦克风权限',
+        characterState: CHARACTER_STATES.IDLE,
+      });
+      this.stopRecordAnimation();
     });
 
     // 恢复保存的对话历史
@@ -113,6 +236,10 @@ Page({
 
   onUnload() {
     this.stopPlayAnimation();
+    this.stopRecordAnimation();
+    if (this.data.isCallActive) {
+      this.endCall();
+    }
     if (this.audioContext) {
       this.audioContext.destroy();
     }
@@ -189,27 +316,333 @@ Page({
   },
 
   // ═══════════════════════════════════════
-  // 文字输入对话
+  // 通话模式
   // ═══════════════════════════════════════
 
-  onInputChange(e) {
-    this.setData({ inputText: e.detail.value });
+  switchMode(e) {
+    const mode = e.currentTarget.dataset.mode;
+    if (mode === this.data.conversationMode) return;
+
+    // 退出当前模式的活跃状态
+    if (this.data.isCallActive) {
+      this.endCall();
+    }
+    if (this.data.isRecording) {
+      this.recorderManager.stop();
+    }
+
+    this.setData({ conversationMode: mode });
   },
 
-  onSendText() {
-    const text = this.data.inputText.trim();
-    if (!text || this.data.isLoading || this.data.isSpeaking) return;
-
-    this.setData({
-      inputText: '',
-      error: '',
-      userTranscript: text,
-      currentTurn: null,
-      isLoading: true,
-      characterState: CHARACTER_STATES.THINKING,
+  startCall() {
+    // 通话模式开启后注册 VAD 帧回调（不放在 onLoad，避免影响按说模式）
+    this.recorderManager.onFrameRecorded((res) => {
+      this.handleCallFrame(res);
     });
 
-    this.callChatAPI(text);
+    // 清理旧音频文件，防止存储堆积
+    try {
+      const fs = wx.getFileSystemManager();
+      const files = fs.readdirSync(wx.env.USER_DATA_PATH);
+      for (const f of files) {
+        if (f.startsWith('call_') || f.startsWith('voice_')) {
+          fs.unlink(`${wx.env.USER_DATA_PATH}/${f}`, () => {});
+        }
+      }
+    } catch (e) {}
+
+    this.setData({
+      isCallActive: true,
+      callStatus: 'listening',
+      error: '',
+      characterState: CHARACTER_STATES.LISTENING,
+    });
+    this._callModeActive = true;
+    this._callListening = true;
+    this._callSpeechFrames = [];
+    this._callSilenceCount = 0;
+    this.startCallRecording();
+  },
+
+  startCallRecording() {
+    this._callModeRecording = true; // 通话模式（PCM）
+    try {
+      this.recorderManager.start({
+        format: 'pcm',
+        sampleRate: 16000,
+        numberOfChannels: 1,
+        frameSize: 4,
+      });
+    } catch (e) {
+      console.error('startCallRecording error:', e);
+      this.setData({ error: '通话录音启动失败' });
+    }
+  },
+
+  endCall() {
+    this._callModeActive = false;
+    this._callListening = false;
+    this._callSpeechFrames = [];
+    this._callSilenceCount = 0;
+    if (this.audioContext) {
+      this.audioContext.stop();
+    }
+    this.recorderManager.stop();
+    this.setData({
+      isCallActive: false,
+      callStatus: 'idle',
+      isRecording: false,
+      isLoading: false,
+      isSpeaking: false,
+      characterState: CHARACTER_STATES.IDLE,
+    });
+    this.stopPlayAnimation();
+    this.stopRecordAnimation();
+  },
+
+  resumeCallListen() {
+    if (!this.data.isCallActive) return;
+    this._callListening = true;
+    this._callSpeechFrames = [];
+    this._callSilenceCount = 0;
+    this.setData({ callStatus: 'listening', characterState: CHARACTER_STATES.LISTENING });
+    this.startCallRecording();
+  },
+
+  // VAD 逐帧处理（半双工：录音只在上一次 AI 播完后运行）
+  handleCallFrame(res) {
+    try {
+      if (!this.data.isCallActive || !this._callListening) return;
+      if (!res || !res.frameBuffer) return;
+
+      const energy = calcEnergy(res.frameBuffer);
+      const isSpeech = energy > VAD_SPEECH_THRESHOLD;
+
+      if (isSpeech) {
+        if (this._callSpeechFrames.length === 0) {
+          this._recordStartTime = Date.now(); // 记录说话开始时间
+        }
+        this._callSpeechFrames.push(res.frameBuffer);
+        this._callSilenceCount = 0;
+
+        // 防止单段语音无限累积（超时强制处理）
+        if (this._callSpeechFrames.length >= VAD_MAX_SPEECH_FRAMES) {
+          this._callListening = false;
+          this.recorderManager.stop();
+        }
+      } else if (this._callSpeechFrames.length > 0) {
+        this._callSilenceCount++;
+        if (this._callSilenceCount >= VAD_SILENCE_FRAMES) {
+          // 静音够久，该轮说话结束——停止录音，触发 onStop 处理
+          this._callListening = false;
+          this.recorderManager.stop();
+        }
+      }
+    } catch (e) {
+      console.error('VAD error:', e);
+    }
+  },
+
+  // 处理一回合说话内容
+  processCallUtterance(frames) {
+    try {
+      if (!frames || frames.length < VAD_MIN_SPEECH_FRAMES) {
+        // 太短，忽略，继续监听
+        this.setData({ callStatus: 'listening', characterState: CHARACTER_STATES.LISTENING });
+        this.resumeCallListen();
+        return;
+      }
+
+      this.setData({ callStatus: 'processing' });
+
+      // PCM 转 WAV 后写入临时文件
+      const pcmData = concatArrayBuffers(frames);
+      const wavBuffer = encodeWAV(pcmData, 16000, 1);
+      const tempPath = `${wx.env.USER_DATA_PATH}/call_${Date.now()}.wav`;
+      const fs = wx.getFileSystemManager();
+      fs.writeFile({
+        filePath: tempPath,
+        data: wavBuffer,
+        success: () => {
+          this.handleVoiceInput(tempPath);
+        },
+        fail: () => {
+          this.setData({ error: '通话录音处理失败' });
+          this.resumeCallListen();
+        },
+      });
+    } catch (e) {
+      console.error('processCallUtterance error:', e);
+      this.setData({ error: '通话处理异常' });
+      this.resumeCallListen();
+    }
+  },
+
+  // ═══════════════════════════════════════
+  // 语音输入
+  // ═══════════════════════════════════════
+
+  onToggleRecord() {
+    if (this.data.isRecording) {
+      this.recorderManager.stop();
+    } else {
+      this.startRecording();
+    }
+  },
+
+  startRecording() {
+    this._callModeRecording = false; // 按说模式（mp3）
+    this._recordStartTime = Date.now(); // 记录开始时间
+    this.setData({
+      isRecording: true,
+      error: '',
+      characterState: CHARACTER_STATES.LISTENING,
+    });
+    this.startRecordAnimation();
+
+    try {
+      this.recorderManager.start({
+        format: 'mp3',
+        sampleRate: 16000,
+        numberOfChannels: 1,
+        encodeBitRate: 24000,
+      });
+    } catch (e) {
+      console.error('startRecording error:', e);
+      this.setData({ isRecording: false, error: '录音启动失败' });
+      this.stopRecordAnimation();
+    }
+  },
+
+  // 处理语音输入 → 语音输出
+  async handleVoiceInput(tempFilePath) {
+    const scenarioId = this.data.scenarios[this.data.currentScenarioIndex].id;
+
+    // 计算用户录音时长
+    const userDuration = this._recordStartTime
+      ? Math.round((Date.now() - this._recordStartTime) / 1000)
+      : 3;
+    const userDurText = this.formatDuration(userDuration);
+
+    // 立即创建用户语音气泡（不等 API）
+    const pendingTurn = {
+      user: '🎤',
+      ai: { english: '', chinese: '', correction: null },
+      tokens: [],
+      isVoice: true,
+      isPending: true,
+      aiAudioPath: null,
+      userAudioPath: tempFilePath,
+      userDuration,
+      userDurationText: userDurText,
+      aiDuration: 0,
+      aiDurationText: '',
+      isPlaying: false,
+    };
+    const history = this.data.scenarioHistory[scenarioId] || [];
+    const updatedHistory = [...history, pendingTurn];
+    const newHistory = { ...this.data.scenarioHistory, [scenarioId]: updatedHistory };
+
+    this.setData({
+      scenarioHistory: newHistory,
+      displayTurns: updatedHistory,
+      showWelcome: false,
+      isLoading: true,
+      characterState: CHARACTER_STATES.THINKING,
+      callStatus: this.data.isCallActive ? 'processing' : this.data.callStatus,
+    });
+
+    try {
+      // 构建 AI 历史（当前轮之前的对话）
+      const aiHistory = [];
+      for (const turn of history) {
+        if (turn.user && turn.user !== '🎤') {
+          aiHistory.push({ role: 'user', content: turn.user });
+        }
+        if (turn.ai && turn.ai.english) {
+          aiHistory.push({ role: 'assistant', content: turn.ai.english });
+        }
+      }
+
+      const result = await API.sendVoiceForChat(
+        tempFilePath, scenarioId,
+        this.data.difficulties[this.data.currentDifficultyIndex].id,
+        aiHistory
+      );
+      if (!result.audioPath) throw new Error('No audio response');
+
+      // 替换 pending 为完整记录
+      const turn = {
+        user: result.userText || '🎤',
+        ai: {
+          english: result.aiEnglish, chinese: result.aiChinese,
+          correction: result.aiCorrection || null,
+        },
+        tokens: this.parseWords(result.aiEnglish),
+        isVoice: true, isPending: false,
+        aiAudioPath: result.audioPath,
+        userAudioPath: tempFilePath,
+        userDuration,
+        userDurationText: userDurText,
+        aiDuration: 0,
+        aiDurationText: '',
+        isPlaying: false,
+      };
+      const finalHistory = [...this.data.scenarioHistory[scenarioId].slice(0, -1), turn];
+      this.setData({
+        scenarioHistory: { ...this.data.scenarioHistory, [scenarioId]: finalHistory },
+        displayTurns: finalHistory, isLoading: false,
+        characterState: CHARACTER_STATES.SPEAKING,
+        callStatus: this.data.isCallActive ? 'speaking' : this.data.callStatus,
+      });
+      this.saveScenarioHistory();
+
+      // 播放 AI 语音回复，并通过 onCanplay 获取时长
+      this.setData({ isSpeaking: true });
+      this.startPlayAnimation();
+      this.audioContext.src = result.audioPath;
+      this._currentTurnIndex = finalHistory.length - 1;
+      this.audioContext.play();
+
+      // 监听音频就绪，获取时长
+      const getDuration = () => {
+        const dur = this.audioContext.duration;
+        if (dur && dur > 0) {
+          const duration = Math.round(dur);
+          this.updateTurnDuration(this._currentTurnIndex, duration);
+          this.audioContext.offCanplay(getDuration);
+        }
+      };
+      this.audioContext.onCanplay(getDuration);
+      setTimeout(getDuration, 500); // 兜底
+    } catch (err) {
+      console.error('Voice input error:', err);
+      const errHistory = this.data.scenarioHistory[scenarioId].slice(0, -1);
+      this.setData({
+        scenarioHistory: { ...this.data.scenarioHistory, [scenarioId]: errHistory },
+        displayTurns: errHistory, isLoading: false,
+        characterState: CHARACTER_STATES.IDLE, error: '语音处理失败，请重试',
+        callStatus: this.data.isCallActive ? 'listening' : this.data.callStatus,
+      });
+      if (this.data.isCallActive) this.resumeCallListen();
+    }
+  },
+
+  // 更新某条记录的语音时长
+  updateTurnDuration(index, duration) {
+    const turns = this.data.displayTurns;
+    if (!turns[index]) return;
+    turns[index].aiDuration = duration;
+    turns[index].aiDurationText = this.formatDuration(duration);
+    this.setData({ displayTurns: turns });
+  },
+
+  // 格式化秒数为 mm:ss
+  formatDuration(seconds) {
+    if (!seconds || seconds <= 0) return '0:03';
+    const m = Math.floor(seconds / 60);
+    const s = seconds % 60;
+    return `${m}:${s.toString().padStart(2, '0')}`;
   },
 
   async callChatAPI(text) {
@@ -351,13 +784,45 @@ Page({
 
   noop() {},
 
+  // 播放历史语音消息
+  playVoiceMessage(e) {
+    const index = e.currentTarget.dataset.turnIndex;
+    const turn = this.data.displayTurns[index];
+    if (turn && turn.aiAudioPath) {
+      this.audioContext.src = turn.aiAudioPath;
+      this.audioContext.play();
+    }
+  },
+
+  // 点击播放用户语音
+  onPlayUserVoice(e) {
+    const index = e.currentTarget.dataset.turnIndex;
+    const turn = this.data.displayTurns[index];
+    if (!turn || !turn.userAudioPath) return;
+
+    // 如果正在播放同一个，停止
+    if (this.data.activeUserVoiceIndex === index) {
+      this.audioContext.stop();
+      this._isUserVoicePlay = false;
+      this.setData({ activeUserVoiceIndex: -1 });
+      return;
+    }
+
+    // 停止当前所有播放
+    this.audioContext.stop();
+    this._isUserVoicePlay = true;
+    this.audioContext.src = turn.userAudioPath;
+    this.audioContext.play();
+    this.setData({ activeUserVoiceIndex: index });
+  },
+
   // ═══════════════════════════════════════
   // 声波动画
   // ═══════════════════════════════════════
 
   startPlayAnimation() {
     this.playTimer = setInterval(() => {
-      const heights = Array.from({ length: 5 }, () =>
+      const heights = Array.from({ length: 10 }, () =>
         Math.round(4 + Math.random() * 24)
       );
       this.setData({ playBarHeights: heights });
@@ -370,7 +835,26 @@ Page({
       this.playTimer = null;
     }
     this.setData({
-      playBarHeights: [8, 12, 8, 16, 10],
+      playBarHeights: [8, 12, 8, 16, 10, 8, 12, 8, 16, 10],
+    });
+  },
+
+  startRecordAnimation() {
+    this.recordTimer = setInterval(() => {
+      const heights = Array.from({ length: 10 }, () =>
+        Math.round(4 + Math.random() * 24)
+      );
+      this.setData({ recordBarHeights: heights });
+    }, 150);
+  },
+
+  stopRecordAnimation() {
+    if (this.recordTimer) {
+      clearInterval(this.recordTimer);
+      this.recordTimer = null;
+    }
+    this.setData({
+      recordBarHeights: [8, 12, 8, 16, 10, 8, 12, 8, 16, 10],
     });
   },
 });
