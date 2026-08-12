@@ -11,12 +11,12 @@ const CHARACTER_STATES = {
 
 // 氛围光颜色映射（状态 → 背景渐变色）
 const AMBIENT_COLORS = {
-  idle: 'rgba(0, 122, 255, 0.25)',
-  listening: 'rgba(90, 200, 250, 0.28)',
-  thinking: 'rgba(255, 149, 0, 0.28)',
-  speaking: 'rgba(52, 199, 89, 0.28)',
-  happy: 'rgba(255, 214, 10, 0.28)',
-  correcting: 'rgba(175, 82, 222, 0.28)',
+  idle: 'rgba(0, 122, 255, 0.35)',
+  listening: 'rgba(90, 200, 250, 0.38)',
+  thinking: 'rgba(255, 149, 0, 0.38)',
+  speaking: 'rgba(52, 199, 89, 0.38)',
+  happy: 'rgba(255, 214, 10, 0.38)',
+  correcting: 'rgba(175, 82, 222, 0.38)',
 };
 
 const SCENARIOS = [
@@ -58,10 +58,9 @@ const DIFFICULTIES = [
   { id: 'advanced', label: '🔴 Advanced', labelCn: '高级' },
 ];
 
-// ═══════ 通话模式 VAD 常量 ═══════
+// 通话模式 VAD 常量
 // 录音参数：format=pcm, sampleRate=16000, mono, frameSize=1KB
 // 每帧 = 4KB = 2048 个 16-bit 采样 = 128ms
-const VAD_SPEECH_THRESHOLD = 640000;   // 能量阈值（RMS 800 的平方）
 const VAD_SILENCE_FRAMES = 6;       // 连续静音 6 帧 ≈ 768ms 判定句末
 const VAD_MIN_SPEECH_FRAMES = 3;    // 最短说话 3 帧 ≈ 384ms，以下忽略
 const VAD_MAX_SPEECH_FRAMES = 156;  // 单段上限 156 帧 ≈ 20 秒，防内存溢出
@@ -128,6 +127,26 @@ function encodeWAV(pcmBuffer, sampleRate, numChannels) {
   return buffer;
 }
 
+// 清理音频文件，只保留最近 N 个，防止存储堆积
+// activePaths: 当前对话仍在引用的文件绝对路径，这些文件不能删
+function cleanupAudioFiles(keepCount = 20, activePaths = []) {
+  try {
+    const fs = wx.getFileSystemManager();
+    const files = fs.readdirSync(wx.env.USER_DATA_PATH);
+    const protectedNames = new Set(
+      (activePaths || []).map(p => String(p).split('/').pop())
+    );
+    const audioFiles = files
+      .filter(f => f.startsWith('call_') || f.startsWith('voice_'))
+      .filter(f => !protectedNames.has(f))
+      .sort((a, b) => (a < b ? 1 : -1)); // 新的排前（时间戳命名）
+    const toDelete = audioFiles.slice(keepCount);
+    for (const f of toDelete) {
+      fs.unlink(`${wx.env.USER_DATA_PATH}/${f}`, () => {});
+    }
+  } catch (e) {}
+}
+
 Page({
   data: {
     statusBarHeight: 44,
@@ -158,11 +177,17 @@ Page({
     activeUserVoiceIndex: -1, // 正在播放的用户语音索引
     scrollTarget: 'conversation-bottom', // 自动滚动目标
     // 通话模式
-    conversationMode: 'press', // 'press'(按说) | 'call'(通话)
+    conversationMode: 'press', // 'press'(对讲) | 'call'(畅聊)
     isCallActive: false,      // 通话是否进行中
     callStatus: 'idle',       // idle|listening|processing
     // 氛围光背景
-    ambientStyle: 'background: radial-gradient(ellipse at 50% 0%, rgba(0,122,255,0.12), transparent 65%);',
+    ambientStyle: 'background: radial-gradient(ellipse at 50% 30%, rgba(0,122,255,0.35), transparent 75%);',
+    // 用户画像（长期记忆）
+    userProfile: {
+      interests: [],
+      level: '',
+      summary: '',
+    },
   },
 
   audioContext: null,
@@ -173,8 +198,11 @@ Page({
   _callModeActive: false,
   _callListening: false,
   _callSpeechFrames: [],
+  _callPendingFrames: null,  // onStop 专用：VAD 保存帧，onStop 消费，其他地方不清空
   _callSilenceCount: 0,
-  _callModeRecording: false, // 当前录音会话是否为通话模式（PCM）
+  _callApiTimer: null,       // API 超时定时器（畅聊模式防卡死）
+  _lastSpeechTime: 0,        // 上次检测到说话的时间戳
+  _vadHeartbeat: null,       // VAD 心跳定时器（兜底防卡死）
 
   onLoad() {
     const app = getApp();
@@ -186,14 +214,16 @@ Page({
     this.recorderManager = wx.getRecorderManager();
 
     this.audioContext.onEnded(() => {
+      // 先无条件复位播放状态，防止 _isUserVoicePlay 提前 return 导致 isSpeaking 卡死
+      this.setData({ isSpeaking: false });
+      this.stopPlayAnimation();
+
       if (this._isUserVoicePlay) {
         this._isUserVoicePlay = false;
         this.setData({ activeUserVoiceIndex: -1 });
         return;
       }
 
-      this.setData({ isSpeaking: false });
-      this.stopPlayAnimation();
       this.setData({ characterState: CHARACTER_STATES.HAPPY }, () => this._syncAmbient());
       setTimeout(() => {
         this.setData({ characterState: CHARACTER_STATES.IDLE }, () => this._syncAmbient());
@@ -208,6 +238,10 @@ Page({
     this.audioContext.onError(() => {
       this.setData({ isSpeaking: false });
       this.stopPlayAnimation();
+      // 畅聊模式：播放失败也要恢复监听，避免卡死
+      if (this.data.isCallActive) {
+        this.resumeCallListen();
+      }
     });
 
     // 录音完成回调
@@ -215,11 +249,23 @@ Page({
       this.setData({ isRecording: false });
       this.stopRecordAnimation();
 
+      // 切换模式/挂断/页面销毁触发的强制停止：丢弃本次录音，不做任何处理
+      if (this._switchingMode) {
+        this._switchingMode = false;
+        return;
+      }
+
       // 通话模式：处理说话段
-      if (this._callModeRecording) {
-        this._callModeRecording = false;
-        const frames = this._callSpeechFrames;
-        this._callSpeechFrames = [];
+      if (this.data.isCallActive) {
+        // 清除心跳定时器
+        if (this._vadHeartbeat) {
+          clearInterval(this._vadHeartbeat);
+          this._vadHeartbeat = null;
+        }
+        const pending = this._callPendingFrames;
+        console.log('[VAD] onStop (call mode), _callPendingFrames:', pending ? pending.length : 'null');
+        const frames = pending || [];
+        this._callPendingFrames = null;
         this.processCallUtterance(frames);
         return;
       }
@@ -237,10 +283,22 @@ Page({
       this.stopRecordAnimation();
     });
 
+    // VAD 帧回调（畅聊模式用）：onLoad 注册一次，避免 startCall 重复注册
+    // 是否处理由 handleCallFrame 内的 isCallActive / _callListening 控制
+    this.recorderManager.onFrameRecorded((res) => {
+      this.handleCallFrame(res);
+    });
+
     // 恢复保存的对话历史
     const saved = wx.getStorageSync('scenarioHistory');
     if (saved) {
       this.setData({ scenarioHistory: saved });
+    }
+
+    // 恢复用户画像
+    const savedProfile = wx.getStorageSync('userProfile');
+    if (savedProfile) {
+      this.setData({ userProfile: savedProfile });
     }
 
     // 恢复当前场景的对话
@@ -249,11 +307,7 @@ Page({
   },
 
   onUnload() {
-    this.stopPlayAnimation();
-    this.stopRecordAnimation();
-    if (this.data.isCallActive) {
-      this.endCall();
-    }
+    this._resetAllAudioState();
     if (this.audioContext) {
       this.audioContext.destroy();
     }
@@ -301,7 +355,55 @@ Page({
   },
 
   onScenarioChange(e) {
-    const index = e.detail.value;
+    this.applyScenario(Number(e.detail.value));
+  },
+
+  onDifficultyChange(e) {
+    this.setData({ currentDifficultyIndex: Number(e.detail.value) });
+  },
+
+  // ═══════════════════════════════════════
+  // 聊天中自动检测场景切换
+  // ═══════════════════════════════════════
+
+  // 从文本中检测场景切换意图，返回匹配的场景 index 或 null
+  detectScenarioFromText(text) {
+    if (!text) return null;
+    const lower = text.toLowerCase();
+    const SCENARIO_KEYWORDS = [
+      { index: 1, keywords: ['restaurant', 'order', 'menu', 'waiter', 'food', 'eat', 'dinner', 'lunch', 'breakfast', 'cafe'] },
+      { index: 2, keywords: ['interview', 'job', 'hire', 'position', 'resume', 'career', 'work', 'hiring'] },
+      { index: 3, keywords: ['travel', 'trip', 'airport', 'flight', 'passport', 'tour', 'vacation', 'plane', 'tourist'] },
+      { index: 4, keywords: ['shopping', 'shop', 'store', 'buy', 'purchase', 'mall', 'price', 'customer'] },
+      { index: 5, keywords: ['hotel', 'check-in', 'check in', 'reservation', 'room', 'book', 'stay', 'lodge', 'accommodation'] },
+    ];
+    for (const entry of SCENARIO_KEYWORDS) {
+      for (const kw of entry.keywords) {
+        if (lower.includes(kw)) return entry.index;
+      }
+    }
+    return null;
+  },
+
+  // 从文本中检测难度调整意图，返回匹配的难度 index 或 null
+  detectDifficultyFromText(text) {
+    if (!text) return null;
+    const lower = text.toLowerCase();
+    // 变简单 → 初级(0)
+    const EASY_TRIGGERS = ['too hard', 'too difficult', 'simpler', 'easier', 'this is hard', 'very difficult', 'simple'];
+    for (const kw of EASY_TRIGGERS) {
+      if (lower.includes(kw)) return 0;
+    }
+    // 变难 → 高级(2)
+    const HARD_TRIGGERS = ['too easy', 'harder', 'more challenging', 'more difficult', 'challenge me', 'advanced', 'difficult'];
+    for (const kw of HARD_TRIGGERS) {
+      if (lower.includes(kw)) return 2;
+    }
+    return null;
+  },
+
+  // 应用场景选择（共用在弹窗和原生 picker 中）
+  applyScenario(index) {
     if (this.audioContext) {
       this.audioContext.stop();
     }
@@ -325,11 +427,6 @@ Page({
     }
   },
 
-  onDifficultyChange(e) {
-    const index = e.detail.value;
-    this.setData({ currentDifficultyIndex: index });
-  },
-
   // ═══════════════════════════════════════
   // 通话模式
   // ═══════════════════════════════════════
@@ -338,33 +435,46 @@ Page({
     const mode = e.currentTarget.dataset.mode;
     if (mode === this.data.conversationMode) return;
 
-    // 退出当前模式的活跃状态
-    if (this.data.isCallActive) {
-      this.endCall();
-    }
-    if (this.data.isRecording) {
-      this.recorderManager.stop();
-    }
+    // 彻底清理所有录音/播放状态，防止模式间串扰
+    this._resetAllAudioState();
 
-    this.setData({ conversationMode: mode });
+    this.setData({
+      conversationMode: mode,
+      isCallActive: false,
+      isRecording: false,
+      callStatus: 'idle',
+      isLoading: false,
+      isSpeaking: false,
+      error: '',
+    }, () => this._syncAmbient());
+  },
+
+  // 彻底清理所有音频/畅聊状态，用于模式切换
+  _resetAllAudioState() {
+    // 标记本次 stop 由状态重置触发（切换模式/挂断/页面销毁），onStop 应跳过处理
+    // 新一轮录音开始（startRecording/startCallRecording）或 onStop 消费后会清除
+    this._switchingMode = true;
+    // 停止录音
+    try { this.recorderManager.stop(); } catch (e) {}
+    // 停止播放
+    if (this.audioContext) { this.audioContext.stop(); }
+    this.stopPlayAnimation();
+    this.stopRecordAnimation();
+
+    // 清理畅聊模式的所有状态
+    this._callModeActive = false;
+    this._callListening = false;
+    this._callSpeechFrames = [];
+    this._callPendingFrames = null;
+    this._callSilenceCount = 0;
+    this._lastSpeechTime = 0;
+    if (this._vadHeartbeat) { clearInterval(this._vadHeartbeat); this._vadHeartbeat = null; }
+    if (this._callApiTimer) { clearTimeout(this._callApiTimer); this._callApiTimer = null; }
   },
 
   startCall() {
-    // 通话模式开启后注册 VAD 帧回调（不放在 onLoad，避免影响按说模式）
-    this.recorderManager.onFrameRecorded((res) => {
-      this.handleCallFrame(res);
-    });
-
-    // 清理旧音频文件，防止存储堆积
-    try {
-      const fs = wx.getFileSystemManager();
-      const files = fs.readdirSync(wx.env.USER_DATA_PATH);
-      for (const f of files) {
-        if (f.startsWith('call_') || f.startsWith('voice_')) {
-          fs.unlink(`${wx.env.USER_DATA_PATH}/${f}`, () => {});
-        }
-      }
-    } catch (e) {}
+    // 清理旧音频文件，防止存储堆积（跳过当前对话引用的文件）
+    cleanupAudioFiles(20, this.collectActiveAudioPaths(this.data.displayTurns));
 
     this.setData({
       isCallActive: true,
@@ -375,12 +485,65 @@ Page({
     this._callModeActive = true;
     this._callListening = true;
     this._callSpeechFrames = [];
+    this._callPendingFrames = null;
     this._callSilenceCount = 0;
+    this._noiseFloor = Infinity; // 自适应 VAD 噪音底噪，Infinity 表示未校准
+    this._noiseCalibFrames = 0; // 校准帧计数
     this.startCallRecording();
   },
 
   startCallRecording() {
-    this._callModeRecording = true; // 通话模式（PCM）
+    // 若 isRecording 是残留的 true（上一段录音未正常结束），强制停止复位，避免静默卡死
+    if (this.data.isRecording) {
+      try { this.recorderManager.stop(); } catch (e) {}
+      this.setData({ isRecording: false });
+    }
+    this._switchingMode = false; // 新一轮录音开始，清除切换标志
+    this._lastSpeechTime = Date.now();
+    this._vadRestartCount = 0; // 录音重启计数（防心跳无限重试导致死循环）
+    this.setData({ isRecording: true }); // 标记录音中，防止重复 start() 中断当前录音
+    // 心跳兜底：每 500ms 检查一次
+    if (this._vadHeartbeat) clearInterval(this._vadHeartbeat);
+    this._vadHeartbeat = setInterval(() => {
+      if (!this.data.isCallActive) return;
+      if (!this._callListening) return;
+
+      const silenceMs = Date.now() - this._lastSpeechTime;
+      const frameCount = this._callSpeechFrames.length;
+
+      // 有帧且 2 秒无新语音 → 强制停止
+      if (frameCount > 0 && silenceMs > 2000) {
+        console.log('[VAD] heartbeat: stop after', silenceMs + 'ms silence, frames:', frameCount);
+        this._vadRestartCount = 0;
+        this._callListening = false;
+        this._callPendingFrames = [...this._callSpeechFrames];
+        this._callSpeechFrames = [];
+        this.recorderManager.stop();
+        return;
+      }
+
+      // 没帧且 5 秒无任何帧 → 说明 onFrameRecorded 停了，重启录音（有限次，防死循环）
+      if (frameCount === 0 && silenceMs > 5000) {
+        this._vadRestartCount++;
+        if (this._vadRestartCount >= 3) {
+          console.error('[VAD] heartbeat: recording failed to start, ending call');
+          this._resetAllAudioState();
+          this.setData({
+            isCallActive: false,
+            callStatus: 'idle',
+            isRecording: false,
+            isLoading: false,
+            isSpeaking: false,
+            characterState: CHARACTER_STATES.IDLE,
+            error: '录音启动失败，请重新开始对话',
+          }, () => this._syncAmbient());
+          return;
+        }
+        console.log('[VAD] heartbeat: no frames for 5s, resetting recording');
+        this._callListening = false;
+        this.recorderManager.stop();
+      }
+    }, 500);
     try {
       this.recorderManager.start({
         format: 'pcm',
@@ -395,14 +558,7 @@ Page({
   },
 
   endCall() {
-    this._callModeActive = false;
-    this._callListening = false;
-    this._callSpeechFrames = [];
-    this._callSilenceCount = 0;
-    if (this.audioContext) {
-      this.audioContext.stop();
-    }
-    this.recorderManager.stop();
+    this._resetAllAudioState();
     this.setData({
       isCallActive: false,
       callStatus: 'idle',
@@ -411,12 +567,16 @@ Page({
       isSpeaking: false,
       characterState: CHARACTER_STATES.IDLE,
     }, () => this._syncAmbient());
-    this.stopPlayAnimation();
-    this.stopRecordAnimation();
   },
 
   resumeCallListen() {
     if (!this.data.isCallActive) return;
+    // 已经在监听中，无需重复启动（防止 onEnded 延迟触发导致的录音重启）
+    if (this._callListening) {
+      console.log('[VAD] resumeCallListen skipped: already listening');
+      return;
+    }
+    console.log('[VAD] resumeCallListen');
     this._callListening = true;
     this._callSpeechFrames = [];
     this._callSilenceCount = 0;
@@ -431,9 +591,28 @@ Page({
       if (!res || !res.frameBuffer) return;
 
       const energy = calcEnergy(res.frameBuffer);
-      const isSpeech = energy > VAD_SPEECH_THRESHOLD;
+
+      // 自适应噪声底噪：前 10 帧取最小值作为底噪（防止第一帧碰巧是人声导致阈值过高）
+      if (this._noiseCalibFrames < 10) {
+        this._noiseFloor = Math.min(this._noiseFloor, energy);
+        this._noiseCalibFrames++;
+        if (this._noiseCalibFrames === 10) {
+          console.log('[VAD] noise floor calibrated:', Math.round(this._noiseFloor));
+        }
+      } else if (energy < this._noiseFloor * 2.5) {
+        // 非说话帧 → 更新噪音底噪
+        this._noiseFloor = this._noiseFloor * 0.95 + energy * 0.05;
+      }
+      const isSpeech = energy > this._noiseFloor * 2.5;
+
+      // 调试：每 10 帧输出能量和噪音底噪
+      if (this._callSpeechFrames.length % 10 === 0) {
+        console.log('[VAD] energy:', Math.round(energy), 'noiseFloor:', Math.round(this._noiseFloor), 'isSpeech:', isSpeech, 'frames:', this._callSpeechFrames.length);
+      }
 
       if (isSpeech) {
+        this._vadRestartCount = 0; // 有说话帧，说明录音正常，重置重启计数
+        this._lastSpeechTime = Date.now(); // 更新语音活动时间戳（心跳兜底用）
         if (this._callSpeechFrames.length === 0) {
           this._recordStartTime = Date.now(); // 记录说话开始时间
         }
@@ -443,6 +622,8 @@ Page({
         // 防止单段语音无限累积（超时强制处理）
         if (this._callSpeechFrames.length >= VAD_MAX_SPEECH_FRAMES) {
           this._callListening = false;
+          this._callPendingFrames = [...this._callSpeechFrames];
+          this._callSpeechFrames = [];
           this.recorderManager.stop();
         }
       } else if (this._callSpeechFrames.length > 0) {
@@ -450,6 +631,9 @@ Page({
         if (this._callSilenceCount >= VAD_SILENCE_FRAMES) {
           // 该轮说话结束——停止录音，触发 onStop 处理
           this._callListening = false;
+          this._callPendingFrames = [...this._callSpeechFrames];
+          this._callSpeechFrames = [];
+          console.log('[VAD] stop, pending frames:', this._callPendingFrames.length);
           this.recorderManager.stop();
         }
       }
@@ -461,6 +645,7 @@ Page({
   // 处理一回合说话内容
   processCallUtterance(frames) {
     try {
+      console.log('[VAD] processCallUtterance frames:', frames.length);
       if (!frames || frames.length < VAD_MIN_SPEECH_FRAMES) {
         // 太短，忽略，继续监听
         this.setData({ callStatus: 'listening', characterState: CHARACTER_STATES.LISTENING }, () => this._syncAmbient());
@@ -506,7 +691,9 @@ Page({
   },
 
   startRecording() {
-    this._callModeRecording = false; // 按说模式（mp3）
+    // 强制停止可能残留的录音，确保 recorder 处于干净状态（畅聊卡死后切换回对讲时必走此路）
+    try { this.recorderManager.stop(); } catch (e) {}
+    this._switchingMode = false; // 新一轮录音开始，清除切换标志
     this._recordStartTime = Date.now(); // 记录开始时间
     this.setData({
       isRecording: true,
@@ -532,6 +719,7 @@ Page({
   // 处理语音输入 → 语音输出
   async handleVoiceInput(tempFilePath) {
     const scenarioId = this.data.scenarios[this.data.currentScenarioIndex].id;
+    const modeAtRequest = this.data.conversationMode; // 记录请求发起时的模式
 
     // 计算用户录音时长
     const userDuration = this._recordStartTime
@@ -571,9 +759,17 @@ Page({
     });
 
     try {
-      // 构建 AI 历史（当前轮之前的对话）
+      // 构建 AI 历史（滑动窗口：只发最近 20 轮，控制上下文窗口）
+      const recentHistory = history.slice(-20);
       const aiHistory = [];
-      for (const turn of history) {
+      // 注入用户画像（长期记忆）作为 system 消息，让 AI 了解用户背景
+      if (this.data.userProfile.summary) {
+        aiHistory.push({
+          role: 'system',
+          content: `User profile: ${this.data.userProfile.summary} Tailor your responses to the user's interests and level.`,
+        });
+      }
+      for (const turn of recentHistory) {
         if (turn.user && turn.user !== '🎤') {
           aiHistory.push({ role: 'user', content: turn.user });
         }
@@ -582,12 +778,47 @@ Page({
         }
       }
 
-      const result = await API.sendVoiceForChat(
-        tempFilePath, scenarioId,
-        this.data.difficulties[this.data.currentDifficultyIndex].id,
-        aiHistory
-      );
+      const result = await Promise.race([
+        API.sendVoiceForChat(
+          tempFilePath, scenarioId,
+          this.data.difficulties[this.data.currentDifficultyIndex].id,
+          aiHistory,
+          this.data.userProfile.summary || ''
+        ),
+        // 30 秒超时，防止畅聊模式卡在 processing
+        new Promise((_, reject) => {
+          this._callApiTimer = setTimeout(() => {
+            reject(new Error('API timeout'));
+          }, 30000);
+        }),
+      ]);
+      clearTimeout(this._callApiTimer);
+      // 等待 AI 期间用户切换了模式：丢弃本次结果，并移除 pending 回合
+      if (modeAtRequest !== this.data.conversationMode) {
+        const staleHistory = this.data.scenarioHistory[scenarioId].slice(0, -1);
+        this.setData({
+          scenarioHistory: { ...this.data.scenarioHistory, [scenarioId]: staleHistory },
+          displayTurns: staleHistory,
+          isLoading: false,
+          characterState: CHARACTER_STATES.IDLE,
+        }, () => this._syncAmbient());
+        return;
+      }
       if (!result.audioPath) throw new Error('No audio response');
+
+      // 更新用户画像（长期记忆）
+      this._updateUserProfile(result.userText || '', result.aiCorrection);
+
+      // 聊天中自动检测场景/难度切换（静默更新，下次调用生效）
+      const userText = result.userText || '';
+      const detectedScenario = this.detectScenarioFromText(userText);
+      const detectedDifficulty = this.detectDifficultyFromText(userText);
+      if (detectedScenario !== null && detectedScenario !== this.data.currentScenarioIndex) {
+        this.setData({ currentScenarioIndex: detectedScenario });
+      }
+      if (detectedDifficulty !== null && detectedDifficulty !== this.data.currentDifficultyIndex) {
+        this.setData({ currentDifficultyIndex: detectedDifficulty });
+      }
 
       // 替换 pending 为完整记录
       const turn = {
@@ -621,9 +852,15 @@ Page({
       // 播放 AI 语音回复，并通过 onCanplay 获取时长
       this.setData({ isSpeaking: true });
       this.startPlayAnimation();
+      // AI 语音接管音频上下文，清除上一段用户语音播放状态，防止标志泄漏
+      this._isUserVoicePlay = false;
+      this.setData({ activeUserVoiceIndex: -1 });
       this.audioContext.src = result.audioPath;
       this._currentTurnIndex = finalHistory.length - 1;
       this.audioContext.play();
+
+      // 本轮结束，清理旧音频文件（跳过当前对话引用的文件）
+      cleanupAudioFiles(20, this.collectActiveAudioPaths(this.data.displayTurns));
 
       // 监听音频就绪，获取时长
       const getDuration = () => {
@@ -658,6 +895,16 @@ Page({
     this.setData({ displayTurns: turns });
   },
 
+  // 收集当前对话仍在引用的音频文件路径（防止被清理删除）
+  collectActiveAudioPaths(turns) {
+    const paths = [];
+    for (const turn of turns || []) {
+      if (turn.aiAudioPath) paths.push(turn.aiAudioPath);
+      if (turn.userAudioPath) paths.push(turn.userAudioPath);
+    }
+    return paths;
+  },
+
   // 格式化秒数为 mm:ss
   formatDuration(seconds) {
     if (!seconds || seconds <= 0) return '0:03';
@@ -667,12 +914,30 @@ Page({
   },
 
   async callChatAPI(text) {
+    // 聊天中自动检测场景/难度切换
+    const detectedScenario = this.detectScenarioFromText(text);
+    const detectedDifficulty = this.detectDifficultyFromText(text);
+    if (detectedScenario !== null && detectedScenario !== this.data.currentScenarioIndex) {
+      this.setData({ currentScenarioIndex: detectedScenario });
+    }
+    if (detectedDifficulty !== null && detectedDifficulty !== this.data.currentDifficultyIndex) {
+      this.setData({ currentDifficultyIndex: detectedDifficulty });
+    }
+
     const scenarioId = this.data.scenarios[this.data.currentScenarioIndex].id;
     const history = this.data.scenarioHistory[scenarioId] || [];
 
-    // 构建 AI 历史格式
+    // 构建 AI 历史（滑动窗口：只发最近 20 轮，控制上下文窗口）
+    const recentHistory = history.slice(-20);
     const aiHistory = [];
-    for (const turn of history) {
+    // 注入用户画像（长期记忆）作为 system 消息，让 AI 了解用户背景
+    if (this.data.userProfile.summary) {
+      aiHistory.push({
+        role: 'system',
+        content: `User profile: ${this.data.userProfile.summary} Tailor your responses to the user's interests and level.`,
+      });
+    }
+    for (const turn of recentHistory) {
       aiHistory.push({ role: 'user', content: turn.user });
       aiHistory.push({ role: 'assistant', content: turn.ai.english });
     }
@@ -682,8 +947,12 @@ Page({
         text,
         scenarioId,
         this.data.difficulties[this.data.currentDifficultyIndex].id,
-        aiHistory
+        aiHistory,
+        this.data.userProfile.summary || ''
       );
+
+      // 更新用户画像（长期记忆）
+      this._updateUserProfile(text, result.correction);
 
       const turn = {
         user: text,
@@ -825,11 +1094,66 @@ Page({
     });
   },
 
+  // ═══════════════════════════════════════
+  // 用户画像（长期记忆）
+  // ═══════════════════════════════════════
+
+  // 更新用户画像：根据对话内容记录兴趣等
+  _updateUserProfile(userText, correction) {
+    if (!userText) return;
+    const profile = { ...this.data.userProfile };
+
+    // 检测兴趣（复用场景关键词）
+    const detectedScenario = this.detectScenarioFromText(userText);
+    if (detectedScenario !== null) {
+      const label = this.data.scenarios[detectedScenario].label;
+      if (!profile.interests.includes(label)) {
+        profile.interests.push(label);
+      }
+    }
+
+    // 记录需要纠错（说明该领域有待提高）
+    if (correction) {
+      profile.mistakes = profile.mistakes || [];
+      // 简单记录，避免重复
+      if (profile.mistakes.length === 0 || profile.mistakes[profile.mistakes.length - 1] !== 'recent') {
+        profile.mistakes.push('recent');
+      }
+    }
+
+    // 更新难度
+    profile.level = this.data.difficulties[this.data.currentDifficultyIndex].id;
+
+    // 生成摘要文本（发给 AI 的长期记忆）
+    profile.summary = this._buildProfileSummary(profile);
+
+    this.setData({ userProfile: profile });
+    wx.setStorageSync('userProfile', profile);
+  },
+
+  // 生成用户画像摘要（压缩成一段话，随每次请求发给 AI）
+  _buildProfileSummary(profile) {
+    const parts = [];
+    if (profile.interests && profile.interests.length > 0) {
+      parts.push(`User is interested in: ${profile.interests.join(', ')}.`);
+    }
+    if (profile.level) {
+      parts.push(`Current difficulty: ${profile.level}.`);
+    }
+    if (profile.mistakes && profile.mistakes.length > 0) {
+      parts.push('User has received corrections recently, may need guidance on accuracy.');
+    }
+    return parts.join(' ');
+  },
+
   // 播放历史语音消息
   playVoiceMessage(e) {
     const index = e.currentTarget.dataset.turnIndex;
     const turn = this.data.displayTurns[index];
     if (turn && turn.aiAudioPath) {
+      // 重播 AI 语音，清除上一段用户语音播放状态，防止标志泄漏
+      this._isUserVoicePlay = false;
+      this.setData({ activeUserVoiceIndex: -1 });
       this.audioContext.src = turn.aiAudioPath;
       this.audioContext.play();
     }
@@ -849,8 +1173,11 @@ Page({
       return;
     }
 
-    // 停止当前所有播放
+    // 停止当前所有播放（可能打断正在播放的 AI 语音）
     this.audioContext.stop();
+    // 打断的 AI 语音不会触发 onEnded，需手动复位 isSpeaking，避免录音按钮卡死
+    this.setData({ isSpeaking: false });
+    this.stopPlayAnimation();
     this._isUserVoicePlay = true;
     this.audioContext.src = turn.userAudioPath;
     this.audioContext.play();

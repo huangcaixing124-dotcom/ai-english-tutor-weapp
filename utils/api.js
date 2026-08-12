@@ -4,14 +4,14 @@ const CONFIG = require('./config');
  * AI 对话 API
  * 发送用户文字，获取 AI 回复
  */
-function sendChat(text, scenario, difficulty, history) {
+function sendChat(text, scenario, difficulty, history, profile) {
   return new Promise((resolve, reject) => {
     const url = CONFIG.apiBaseUrl + CONFIG.chatApi;
     console.log('[API] sendChat URL:', url);
     wx.request({
       url: url,
       method: 'POST',
-      data: { text, scenario, difficulty, history },
+      data: { text, scenario, difficulty, history, profile },
       header: { 'content-type': 'application/json' },
       success(res) {
         if (res.statusCode === 200) {
@@ -91,11 +91,15 @@ module.exports = {
  * 上传音频，返回 AI 语音音频 + 文本信息
  * 返回：{ audioPath, userText, aiEnglish, aiChinese, aiCorrection }
  */
-function sendVoiceForChat(tempFilePath, scenario, difficulty, history) {
+function sendVoiceForChat(tempFilePath, scenario, difficulty, history, profile) {
   return new Promise((resolve, reject) => {
     const formData = { scenario, difficulty };
     if (history && history.length > 0) {
       formData.history = JSON.stringify(history);
+    }
+    // 用户画像（长期记忆），后端可注入 system prompt
+    if (profile) {
+      formData.profile = profile;
     }
     wx.uploadFile({
       url: CONFIG.apiBaseUrl + '/api/voice',

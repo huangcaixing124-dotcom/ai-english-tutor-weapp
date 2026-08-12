@@ -9,43 +9,16 @@
   <view class="header" style="padding-top: {{statusBarHeight}}px;">
     <view class="header-inner">
       <text class="header-title">AI English Tutor</text>
-      <text class="header-subtitle">Your personal speaking coach</text>
-    </view>
-  </view>
-
-  <!-- 场景/难度选择 -->
-  <view class="selector-section">
-    <view class="selector-row">
-      <picker mode="selector" range="{{scenarioNames}}" value="{{currentScenarioIndex}}"
-        bindchange="onScenarioChange" class="picker-selector">
-        <view class="picker-label">
-          <text class="picker-label-text">Scenario</text>
-          <text class="picker-value">{{scenarios[currentScenarioIndex].label}}</text>
-          <text class="picker-arrow">▼</text>
-        </view>
-      </picker>
-      <picker mode="selector" range="{{difficultyNames}}" value="{{currentDifficultyIndex}}"
-        bindchange="onDifficultyChange" class="picker-selector">
-        <view class="picker-label">
-          <text class="picker-label-text">Level</text>
-          <text class="picker-value">{{difficulties[currentDifficultyIndex].label}}</text>
-          <text class="picker-arrow">▼</text>
-        </view>
-      </picker>
     </view>
   </view>
 
   <!-- 模式切换 -->
   <view class="mode-switch">
-    <view class="mode-switch-inner">
-      <view class="mode-tab {{conversationMode === 'press' ? 'active' : ''}}" data-mode="press" bindtap="switchMode">
-        <text class="mode-tab-icon">🔴</text>
-        <text class="mode-tab-text">按说</text>
-      </view>
-      <view class="mode-tab {{conversationMode === 'call' ? 'active' : ''}}" data-mode="call" bindtap="switchMode">
-        <text class="mode-tab-icon">📞</text>
-        <text class="mode-tab-text">通话</text>
-      </view>
+    <view class="mode-tab {{conversationMode === 'press' ? 'active' : ''}}" data-mode="press" bindtap="switchMode">
+      <text class="mode-tab-text">对讲</text>
+    </view>
+    <view class="mode-tab {{conversationMode === 'call' ? 'active' : ''}}" data-mode="call" bindtap="switchMode">
+      <text class="mode-tab-text">畅聊</text>
     </view>
   </view>
 
@@ -80,79 +53,54 @@
               <text class="bubble-user-text">{{item.user}}</text>
             </view>
           </block>
-          <!-- AI 语音回复 → 文字展示 + 播放按钮 -->
+          <!-- AI 语音回复 → 极简文字展示 -->
           <block wx:if="{{item.isVoice && !item.isPending}}">
-            <view class="bubble-group" style="margin-top: 12rpx;">
-              <view class="bubble bubble-ai">
-              <view class="bubble-body">
-                <view class="bubble-label-row">
-                  <text class="bubble-label bubble-label-english">ENGLISH <text class="word-hint">(tap words)</text></text>
-                    <view class="replay-btn" bindtap="playVoiceMessage" data-turn-index="{{index}}">
-                      <text class="replay-icon">🔊</text>
-                    </view>
-                  </view>
-                  <view class="word-container">
-                    <block wx:for="{{item.tokens}}" wx:key="index" wx:for-item="word">
-                      <text wx:if="{{word.isWord}}" class="word-tappable" data-word="{{word.text}}" bindtap="onWordTap">{{word.text}}</text>
-                      <text wx:else class="word-punct">{{word.text}}</text>
-                    </block>
-                  </view>
+            <view class="ai-message" style="margin-top: 16rpx;">
+              <!-- 英文正文 + 重播按钮 -->
+              <view class="ai-english-line">
+                <view class="word-container">
+                  <block wx:for="{{item.tokens}}" wx:key="index" wx:for-item="word">
+                    <text wx:if="{{word.isWord}}" class="word-tappable" data-word="{{word.text}}" bindtap="onWordTap">{{word.text}}</text>
+                    <text wx:else class="word-punct">{{word.text}}</text>
+                  </block>
+                </view>
+                <view class="ai-replay-btn" bindtap="playVoiceMessage" data-turn-index="{{index}}">
+                  <text class="ai-replay-icon">🔊</text>
                 </view>
               </view>
-              <view class="bubble bubble-ai">
-                <view class="bubble-body">
-                  <text class="bubble-label bubble-label-translate">翻译</text>
-                  <text class="bubble-text bubble-text-secondary">{{item.ai.chinese}}</text>
-                </view>
-              </view>
-              <view class="bubble bubble-ai bubble-correction" wx:if="{{item.ai.correction}}">
-                <view class="bubble-body">
-                  <text class="bubble-label bubble-label-orange">TIP</text>
-                  <text class="bubble-text bubble-text-secondary">{{item.ai.correction}}</text>
-                </view>
+              <!-- 翻译 -->
+              <view class="ai-translate">{{item.ai.chinese}}</view>
+              <!-- 纠错提示 -->
+              <view class="ai-correction" wx:if="{{item.ai.correction}}">
+                <text class="ai-correction-text">{{item.ai.correction}}</text>
               </view>
             </view>
           </block>
           <!-- AI 加载中 -->
           <block wx:elif="{{item.isVoice && item.isPending}}">
-            <view class="bubble-ai-loading">
-              <view class="loading-dots">
-                <view class="dot dot-1" />
-                <view class="dot dot-2" />
-                <view class="dot dot-3" />
-              </view>
+            <view class="ai-loading-dots">
+              <view class="loading-dot" />
+              <view class="loading-dot" />
+              <view class="loading-dot" />
             </view>
           </block>
           <!-- AI 文字回复（兼容旧数据） -->
           <block wx:else>
-            <view class="bubble-group" style="margin-top: 12rpx;">
-              <view class="bubble bubble-ai">
-              <view class="bubble-body">
-                <view class="bubble-label-row">
-                  <text class="bubble-label bubble-label-english">ENGLISH <text class="word-hint">(tap words)</text></text>
-                    <view class="replay-btn" wx:if="{{item.aiAudioPath}}" bindtap="playVoiceMessage" data-turn-index="{{index}}">
-                      <text class="replay-icon">🔊</text>
-                    </view>
-                  </view>
-                  <view class="word-container">
-                    <block wx:for="{{item.tokens}}" wx:key="index" wx:for-item="word">
-                      <text wx:if="{{word.isWord}}" class="word-tappable" data-word="{{word.text}}" bindtap="onWordTap">{{word.text}}</text>
-                      <text wx:else class="word-punct">{{word.text}}</text>
-                    </block>
-                  </view>
+            <view class="ai-message" style="margin-top: 16rpx;">
+              <view class="ai-english-line">
+                <view class="word-container">
+                  <block wx:for="{{item.tokens}}" wx:key="index" wx:for-item="word">
+                    <text wx:if="{{word.isWord}}" class="word-tappable" data-word="{{word.text}}" bindtap="onWordTap">{{word.text}}</text>
+                    <text wx:else class="word-punct">{{word.text}}</text>
+                  </block>
+                </view>
+                <view class="ai-replay-btn" wx:if="{{item.aiAudioPath}}" bindtap="playVoiceMessage" data-turn-index="{{index}}">
+                  <text class="ai-replay-icon">🔊</text>
                 </view>
               </view>
-              <view class="bubble bubble-ai">
-                <view class="bubble-body">
-                  <text class="bubble-label bubble-label-translate">翻译</text>
-                  <text class="bubble-text bubble-text-secondary">{{item.ai.chinese}}</text>
-                </view>
-              </view>
-              <view class="bubble bubble-ai bubble-correction" wx:if="{{item.ai.correction}}">
-                <view class="bubble-body">
-                  <text class="bubble-label bubble-label-orange">TIP</text>
-                  <text class="bubble-text bubble-text-secondary">{{item.ai.correction}}</text>
-                </view>
+              <view class="ai-translate">{{item.ai.chinese}}</view>
+              <view class="ai-correction" wx:if="{{item.ai.correction}}">
+                <text class="ai-correction-text">{{item.ai.correction}}</text>
               </view>
             </view>
           </block>
@@ -162,24 +110,16 @@
       <!-- 欢迎语（无对话时展示） -->
       <block wx:if="{{showWelcome && displayTurns.length === 0}}">
         <view class="slide-up">
-          <view class="bubble-group">
-            <view class="bubble bubble-ai">
-              <view class="bubble-body">
-                <text class="bubble-label bubble-label-english">ENGLISH <text class="word-hint">(tap words)</text></text>
-                <view class="word-container">
-                  <block wx:for="{{wordTokens}}" wx:key="index">
-                    <text wx:if="{{item.isWord}}" class="word-tappable" data-word="{{item.text}}" bindtap="onWordTap">{{item.text}}</text>
-                    <text wx:else class="word-punct">{{item.text}}</text>
-                  </block>
-                </view>
+          <view class="ai-message" style="margin-top: 0;">
+            <view class="ai-english-line">
+              <view class="word-container">
+                <block wx:for="{{wordTokens}}" wx:key="index">
+                  <text wx:if="{{item.isWord}}" class="word-tappable" data-word="{{item.text}}" bindtap="onWordTap">{{item.text}}</text>
+                  <text wx:else class="word-punct">{{item.text}}</text>
+                </block>
               </view>
             </view>
-            <view class="bubble bubble-ai">
-              <view class="bubble-body">
-                <text class="bubble-label bubble-label-translate">翻译</text>
-                <text class="bubble-text bubble-text-secondary">{{scenarios[currentScenarioIndex].welcomeChinese}}</text>
-              </view>
-            </view>
+            <view class="ai-translate">{{scenarios[currentScenarioIndex].welcomeChinese}}</view>
           </view>
         </view>
       </block>
@@ -195,7 +135,7 @@
       <text>{{error}}</text>
     </view>
 
-    <!-- 按说模式 -->
+    <!-- 对讲模式 -->
     <block wx:if="{{conversationMode === 'press'}}">
       <!-- 语音录制声波动画 -->
       <view class="voice-indicator {{isRecording ? 'active' : ''}}">
@@ -287,4 +227,5 @@
       </view>
     </view>
   </view>
-</view>
+
+  </view>
