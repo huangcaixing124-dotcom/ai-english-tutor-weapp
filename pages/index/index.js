@@ -249,8 +249,9 @@ Page({
       this.setData({ isRecording: false });
       this.stopRecordAnimation();
 
-      // 切换模式/挂断/页面销毁触发的强制停止：丢弃本次录音，不做任何处理
-      if (this._switchingMode) {
+      // 切换模式/页面销毁触发的强制停止：丢弃本次录音，不做任何处理
+      // 注意：单纯挂断通话（endCall）不走此路，要让畅聊的最后一段帧正常处理
+      if (this._switchingMode && !this.data.isCallActive) {
         this._switchingMode = false;
         return;
       }
@@ -468,6 +469,8 @@ Page({
     this._callPendingFrames = null;
     this._callSilenceCount = 0;
     this._lastSpeechTime = 0;
+    this._nearFieldActive = false;
+    this._lastEnergy = 0;
     if (this._vadHeartbeat) { clearInterval(this._vadHeartbeat); this._vadHeartbeat = null; }
     if (this._callApiTimer) { clearTimeout(this._callApiTimer); this._callApiTimer = null; }
   },
@@ -501,6 +504,7 @@ Page({
     this._switchingMode = false; // 新一轮录音开始，清除切换标志
     this._lastSpeechTime = Date.now();
     this._vadRestartCount = 0; // 录音重启计数（防心跳无限重试导致死循环）
+    this._anyFrameReceived = false; // 是否有帧到达（不管能量够不够）
     this.setData({ isRecording: true }); // 标记录音中，防止重复 start() 中断当前录音
     // 心跳兜底：每 500ms 检查一次
     if (this._vadHeartbeat) clearInterval(this._vadHeartbeat);
@@ -511,7 +515,7 @@ Page({
       const silenceMs = Date.now() - this._lastSpeechTime;
       const frameCount = this._callSpeechFrames.length;
 
-      // 有帧且 2 秒无新语音 → 强制停止
+      // 兜底 1：有帧存下来了但 2 秒无新语音 → 强制停止（即使能量不够高）
       if (frameCount > 0 && silenceMs > 2000) {
         console.log('[VAD] heartbeat: stop after', silenceMs + 'ms silence, frames:', frameCount);
         this._vadRestartCount = 0;
@@ -522,8 +526,20 @@ Page({
         return;
       }
 
-      // 没帧且 5 秒无任何帧 → 说明 onFrameRecorded 停了，重启录音（有限次，防死循环）
-      if (frameCount === 0 && silenceMs > 5000) {
+      // 兜底 2：有帧到达但 VAD 没判定为"说话"（能量不够阈值），
+      // 延迟 8 秒后强制发送，避免畅聊永远卡在"听"
+      if (this._anyFrameReceived && frameCount === 0 && silenceMs > 8000) {
+        console.log('[VAD] heartbeat: forced send after 8s no speech detected');
+        this._vadRestartCount = 0;
+        this._callListening = false;
+        this._callPendingFrames = [];
+        this._callSpeechFrames = [];
+        this.recorderManager.stop();
+        return;
+      }
+
+      // 兜底 3：完全没帧进来 → 说明 onFrameRecorded 停了，重启录音（有限次，防死循环）
+      if (!this._anyFrameReceived && silenceMs > 5000) {
         this._vadRestartCount++;
         if (this._vadRestartCount >= 3) {
           console.error('[VAD] heartbeat: recording failed to start, ending call');
@@ -558,6 +574,18 @@ Page({
   },
 
   endCall() {
+    // 结束通话前，把最后一段未发送的录音帧送出去，避免丢失
+    // processCallUtterance 是异步的（写文件+调API），所以不能等它完成再清理
+    if (this._callSpeechFrames && this._callSpeechFrames.length >= VAD_MIN_SPEECH_FRAMES) {
+      const frames = [...this._callSpeechFrames];
+      this._callSpeechFrames = [];
+      this._callListening = false;
+      this._callPendingFrames = null;
+      // 不清除 _switchingMode，让 processCallUtterance 执行时 isCallActive 仍为 true
+      this.processCallUtterance(frames);
+    }
+
+    // 清理所有音频状态
     this._resetAllAudioState();
     this.setData({
       isCallActive: false,
@@ -580,19 +608,24 @@ Page({
     this._callListening = true;
     this._callSpeechFrames = [];
     this._callSilenceCount = 0;
+    this._nearFieldActive = false; // 近场检测状态重置
+    this._lastEnergy = 0; // 上一帧能量（用于近场检测）
     this.setData({ callStatus: 'listening', characterState: CHARACTER_STATES.LISTENING }, () => this._syncAmbient());
     this.startCallRecording();
   },
 
   // VAD 逐帧处理（半双工：录音只在上一次 AI 播完后运行）
+  // 采用近场检测：当能量突然跳升（≥2 倍）时判定为用户靠近说话，开始采帧；
+  // 持续采帧直到静音帧数达到阈值，停止并发送
   handleCallFrame(res) {
     try {
       if (!this.data.isCallActive || !this._callListening) return;
       if (!res || !res.frameBuffer) return;
 
       const energy = calcEnergy(res.frameBuffer);
+      this._anyFrameReceived = true;
 
-      // 自适应噪声底噪：前 10 帧取最小值作为底噪（防止第一帧碰巧是人声导致阈值过高）
+      // 自适应噪声底噪：前 10 帧取最小值作为底噪
       if (this._noiseCalibFrames < 10) {
         this._noiseFloor = Math.min(this._noiseFloor, energy);
         this._noiseCalibFrames++;
@@ -600,42 +633,63 @@ Page({
           console.log('[VAD] noise floor calibrated:', Math.round(this._noiseFloor));
         }
       } else if (energy < this._noiseFloor * 2.5) {
-        // 非说话帧 → 更新噪音底噪
         this._noiseFloor = this._noiseFloor * 0.95 + energy * 0.05;
       }
-      const isSpeech = energy > this._noiseFloor * 2.5;
 
-      // 调试：每 10 帧输出能量和噪音底噪
-      if (this._callSpeechFrames.length % 10 === 0) {
-        console.log('[VAD] energy:', Math.round(energy), 'noiseFloor:', Math.round(this._noiseFloor), 'isSpeech:', isSpeech, 'frames:', this._callSpeechFrames.length);
+      // 近场检测：能量突然跳升 ≥ 2 倍，且高于底噪 5 倍 → 判定为用户靠近说话
+      const energyRatio = this._lastEnergy > 0 ? energy / this._lastEnergy : 1;
+      const isNearField = energy > this._noiseFloor * 5 && energyRatio >= 2.0;
+
+      // 近场激活：检测到近场事件 → 开始采帧
+      if (isNearField && !this._nearFieldActive) {
+        console.log('[VAD] near-field speech detected, energy:', Math.round(energy), 'ratio:', Math.round(energyRatio * 10) / 10);
+        this._nearFieldActive = true;
+        this._callSpeechFrames = [];
+        this._callSilenceCount = 0;
+        this._recordStartTime = Date.now();
+        // 近场触发时，当前帧也纳入（避免丢失第一帧）
+        this._callSpeechFrames.push(res.frameBuffer);
+        this._lastSpeechTime = Date.now();
       }
 
-      if (isSpeech) {
-        this._vadRestartCount = 0; // 有说话帧，说明录音正常，重置重启计数
-        this._lastSpeechTime = Date.now(); // 更新语音活动时间戳（心跳兜底用）
-        if (this._callSpeechFrames.length === 0) {
-          this._recordStartTime = Date.now(); // 记录说话开始时间
-        }
-        this._callSpeechFrames.push(res.frameBuffer);
-        this._callSilenceCount = 0;
+      // 近场激活后，所有帧都采（不管能量高低，都是近场范围内的声音）
+      if (this._nearFieldActive) {
+        // 如果当前帧能量也高于底噪（可能是人声），更新说话时间
+        if (energy > this._noiseFloor * 2.5) {
+          this._lastSpeechTime = Date.now();
+          this._callSilenceCount = 0;
+          this._callSpeechFrames.push(res.frameBuffer);
 
-        // 防止单段语音无限累积（超时强制处理）
-        if (this._callSpeechFrames.length >= VAD_MAX_SPEECH_FRAMES) {
-          this._callListening = false;
-          this._callPendingFrames = [...this._callSpeechFrames];
-          this._callSpeechFrames = [];
-          this.recorderManager.stop();
+          // 防止单段语音无限累积
+          if (this._callSpeechFrames.length >= VAD_MAX_SPEECH_FRAMES) {
+            console.log('[VAD] max frames reached, sending');
+            this._callListening = false;
+            this._nearFieldActive = false;
+            this._callPendingFrames = [...this._callSpeechFrames];
+            this._callSpeechFrames = [];
+            this.recorderManager.stop();
+          }
+        } else {
+          // 静音帧 → 增加静音计数
+          this._callSilenceCount++;
+          if (this._callSilenceCount >= VAD_SILENCE_FRAMES) {
+            // 句末 → 发送
+            console.log('[VAD] silence threshold reached, sending frames:', this._callSpeechFrames.length);
+            this._callListening = false;
+            this._nearFieldActive = false;
+            this._callPendingFrames = [...this._callSpeechFrames];
+            this._callSpeechFrames = [];
+            this.recorderManager.stop();
+          }
         }
-      } else if (this._callSpeechFrames.length > 0) {
-        this._callSilenceCount++;
-        if (this._callSilenceCount >= VAD_SILENCE_FRAMES) {
-          // 该轮说话结束——停止录音，触发 onStop 处理
-          this._callListening = false;
-          this._callPendingFrames = [...this._callSpeechFrames];
-          this._callSpeechFrames = [];
-          console.log('[VAD] stop, pending frames:', this._callPendingFrames.length);
-          this.recorderManager.stop();
-        }
+      }
+
+      // 更新上一帧能量（用于近场检测）
+      this._lastEnergy = energy;
+
+      // 调试日志
+      if (this._callSpeechFrames.length % 10 === 0 && this._nearFieldActive) {
+        console.log('[VAD] energy:', Math.round(energy), 'noiseFloor:', Math.round(this._noiseFloor), 'nearField:', this._nearFieldActive, 'frames:', this._callSpeechFrames.length);
       }
     } catch (e) {
       console.error('VAD error:', e);
