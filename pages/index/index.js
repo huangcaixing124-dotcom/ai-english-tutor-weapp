@@ -603,7 +603,7 @@ Page({
     this._nearFieldActive = false;
     this._lastEnergy = 0;
     this._peakEnergy = 0;
-    this.setData({ callStatus: 'listening', characterState: CHARACTER_STATES.LISTENING }, () => this._syncAmbient());
+    this.setData({ callStatus: 'listening', characterState: CHARACTER_STATES.LISTENING, error: '' }, () => this._syncAmbient());
     this.startCallRecording();
   },
 
