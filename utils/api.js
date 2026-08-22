@@ -84,6 +84,7 @@ module.exports = {
   getTTSAudio,
   sendVoiceForChat,
   lookupWord,
+  sendVoiceForChatStream,
 };
 
 /**
@@ -167,4 +168,155 @@ function lookupWord(word) {
       },
     });
   });
+}
+
+/**
+ * 流式语音对话 API（WebSocket 版）
+ * 边录边发 PCM 帧，流式接收 AI 回复和音频
+ *
+ * callbacks 支持：
+ *   onStt(text)       - 语音识别结果
+ *   onAiChunk(text)   - AI 流式输出片段
+ *   onAiDone(result)  - AI 完整回复
+ *   onAudio(arrayBuffer) - 音频数据块
+ *   onTtsDone()        - TTS 完成
+ *   onError(err)       - 错误
+ *   onClose()          - 连接关闭
+ *
+ * 返回一个对象：{ sendPcm(frame), sendEnd(), close() }
+ */
+function sendVoiceForChatStream(callbacks = {}) {
+  const url = 'wss://api-backup.hcxserver.xyz';
+  let socketTask = null;
+  let connected = false;
+
+  // 连接 WebSocket
+  socketTask = wx.connectSocket({
+    url: url,
+    success() {
+      console.log('[WS] connecting...');
+    },
+    fail(err) {
+      console.error('[WS] connect error:', err);
+      if (callbacks.onError) callbacks.onError(err);
+    },
+  });
+
+  socketTask.onOpen(() => {
+    console.log('[WS] connected');
+    connected = true;
+    // 发送 ping 保持连接
+    keepAlive();
+  });
+
+  socketTask.onMessage((res) => {
+    try {
+      // 判断是二进制还是文本
+      if (res.data instanceof ArrayBuffer) {
+        // 二进制帧：音频数据
+        if (callbacks.onAudio) callbacks.onAudio(res.data);
+      } else {
+        // 文本帧：JSON
+        const msg = JSON.parse(res.data);
+        switch (msg.type) {
+          case 'config_ack':
+            console.log('[WS] config acknowledged');
+            break;
+          case 'stt':
+            if (callbacks.onStt) callbacks.onStt(msg.text);
+            break;
+          case 'ai_chunk':
+            if (callbacks.onAiChunk) callbacks.onAiChunk(msg.text);
+            break;
+          case 'ai_done':
+            if (callbacks.onAiDone) callbacks.onAiDone({
+              aiEnglish: msg.english,
+              aiChinese: msg.chinese,
+              aiCorrection: msg.correction,
+            });
+            break;
+          case 'tts_done':
+            if (callbacks.onTtsDone) callbacks.onTtsDone();
+            break;
+          case 'error':
+            if (callbacks.onError) callbacks.onError(new Error(msg.message));
+            break;
+          case 'pong':
+            break;
+        }
+      }
+    } catch (e) {
+      console.error('[WS] parse error:', e);
+    }
+  });
+
+  socketTask.onError((err) => {
+    console.error('[WS] error:', err);
+    if (callbacks.onError) callbacks.onError(err);
+  });
+
+  socketTask.onClose(() => {
+    console.log('[WS] closed');
+    connected = false;
+    if (callbacks.onClose) callbacks.onClose();
+  });
+
+  // 心跳保持连接
+  let heartbeatTimer = null;
+  function keepAlive() {
+    if (heartbeatTimer) clearInterval(heartbeatTimer);
+    heartbeatTimer = setInterval(() => {
+      if (connected) {
+        socketTask.send({ data: JSON.stringify({ type: 'ping' }) });
+      } else {
+        clearInterval(heartbeatTimer);
+      }
+    }, 30000);
+  }
+
+  return {
+    /**
+     * 发送配置
+     */
+    sendConfig(scenario, difficulty, history) {
+      socketTask.send({
+        data: JSON.stringify({
+          type: 'config',
+          scenario,
+          difficulty,
+          history: history || [],
+        }),
+      });
+    },
+
+    /**
+     * 发送 PCM 帧（边录边发）
+     */
+    sendPcm(frameBuffer) {
+      if (!connected) return;
+      socketTask.send({
+        data: frameBuffer,
+      });
+    },
+
+    /**
+     * 标记用户说完，开始处理
+     */
+    sendEnd() {
+      if (!connected) return;
+      socketTask.send({
+        data: JSON.stringify({ type: 'end' }),
+      });
+    },
+
+    /**
+     * 关闭连接
+     */
+    close() {
+      if (heartbeatTimer) clearInterval(heartbeatTimer);
+      if (connected) {
+        socketTask.close();
+      }
+    },
+  };
 }

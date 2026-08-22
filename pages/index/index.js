@@ -198,11 +198,14 @@ Page({
   _callModeActive: false,
   _callListening: false,
   _callSpeechFrames: [],
-  _callPendingFrames: null,  // onStop 专用：VAD 保存帧，onStop 消费，其他地方不清空
+  _callPendingFrames: null,
   _callSilenceCount: 0,
-  _callApiTimer: null,       // API 超时定时器（畅聊模式防卡死）
-  _lastSpeechTime: 0,        // 上次检测到说话的时间戳
-  _vadHeartbeat: null,       // VAD 心跳定时器（兜底防卡死）
+  _callApiTimer: null,
+  _lastSpeechTime: 0,
+  _vadHeartbeat: null,
+  _wsStream: null,     // WebSocket 流式连接对象
+  _wsAudioBuffer: [],  // WebSocket 收到的音频块缓存
+  _wsPlaying: false,   // 正在播放 WebSocket 音频
 
   onLoad() {
     const app = getApp();
@@ -472,6 +475,12 @@ Page({
     this._nearFieldActive = false;
     this._lastEnergy = 0;
     this._peakEnergy = 0;
+    if (this._wsStream) {
+      try { this._wsStream.close(); } catch (e) {}
+      this._wsStream = null;
+    }
+    this._wsAudioBuffer = [];
+    this._wsPlaying = false;
     if (this._vadHeartbeat) { clearInterval(this._vadHeartbeat); this._vadHeartbeat = null; }
     if (this._callApiTimer) { clearTimeout(this._callApiTimer); this._callApiTimer = null; }
   },
@@ -491,9 +500,157 @@ Page({
     this._callSpeechFrames = [];
     this._callPendingFrames = null;
     this._callSilenceCount = 0;
-    this._noiseFloor = Infinity; // 自适应 VAD 噪音底噪，Infinity 表示未校准
-    this._noiseCalibFrames = 0; // 校准帧计数
+    this._noiseFloor = Infinity;
+    this._noiseCalibFrames = 0;
+    this._wsAudioBuffer = [];
+    this._wsPlaying = false;
+
+    // 建立 WebSocket 连接
+    const scenarioId = this.data.scenarios[this.data.currentScenarioIndex].id;
+    const difficultyId = this.data.difficulties[this.data.currentDifficultyIndex].id;
+    const history = this.buildAiHistory(this.data.scenarioHistory[scenarioId] || []);
+
+    this._wsStream = API.sendVoiceForChatStream({
+      onStt: (text) => {
+        console.log('[WS] STT:', text);
+      },
+      onAiChunk: (chunk) => {
+        // AI 流式输出片段（不需要显示，等完整回复）
+      },
+      onAiDone: (result) => {
+        console.log('[WS] AI done:', result.aiEnglish?.slice(0, 50));
+        // 更新对话历史
+        this._appendAiTurn(result);
+      },
+      onAudio: (arrayBuffer) => {
+        // 收到音频块，缓存并播放
+        this._wsAudioBuffer.push(arrayBuffer);
+        if (!this._wsPlaying) {
+          this._playWsAudio();
+        }
+      },
+      onTtsDone: () => {
+        console.log('[WS] TTS done');
+      },
+      onError: (err) => {
+        console.error('[WS] error:', err);
+        this.setData({ error: '语音处理失败' });
+        this.resumeCallListen();
+      },
+      onClose: () => {
+        console.log('[WS] closed');
+      },
+    });
+
+    // 发送配置
+    this._wsStream.sendConfig(scenarioId, difficultyId,
+      this.buildWsHistory(this.data.scenarioHistory[scenarioId] || [])
+    );
+
+    // 开始录音
     this.startCallRecording();
+  },
+
+  // 构建 AI 历史记录（用于 HTTP API）
+  buildAiHistory(history) {
+    const recent = history.slice(-20);
+    const aiHistory = [];
+    if (this.data.userProfile.summary) {
+      aiHistory.push({
+        role: 'system',
+        content: `User profile: ${this.data.userProfile.summary} Tailor your responses to the user's interests and level.`,
+      });
+    }
+    for (const turn of recent) {
+      if (turn.user && turn.user !== '🎤') {
+        aiHistory.push({ role: 'user', content: turn.user });
+      }
+      if (turn.ai && turn.ai.english) {
+        aiHistory.push({ role: 'assistant', content: turn.ai.english });
+      }
+    }
+    return aiHistory;
+  },
+
+  // 构建 WebSocket 历史记录（后端格式相同）
+  buildWsHistory(history) {
+    const recent = history.slice(-20);
+    const wsHistory = [];
+    for (const turn of recent) {
+      if (turn.user && turn.user !== '🎤') {
+        wsHistory.push({ role: 'user', content: turn.user });
+      }
+      if (turn.ai && turn.ai.english) {
+        wsHistory.push({ role: 'assistant', content: turn.ai.english });
+      }
+    }
+    return wsHistory;
+  },
+
+  // 播放 WebSocket 音频块
+  _playWsAudio() {
+    if (this._wsAudioBuffer.length === 0) {
+      this._wsPlaying = false;
+      return;
+    }
+    this._wsPlaying = true;
+
+    const buffer = this._wsAudioBuffer.shift();
+    const fs = wx.getFileSystemManager();
+    const tempPath = `${wx.env.USER_DATA_PATH}/ws_audio_${Date.now()}.mp3`;
+
+    fs.writeFile({
+      filePath: tempPath,
+      data: buffer,
+      success: () => {
+        this.audioContext.src = tempPath;
+        this.audioContext.play();
+        // 播完后播下一段
+        this.audioContext.onEnded(() => {
+          this._playWsAudio();
+        });
+      },
+      fail: () => {
+        this._wsPlaying = false;
+      },
+    });
+  },
+
+  // 追加 AI 对话回合到历史记录
+  _appendAiTurn(result) {
+    const scenarioId = this.data.scenarios[this.data.currentScenarioIndex].id;
+    const history = this.data.scenarioHistory[scenarioId] || [];
+
+    const turn = {
+      user: '🎤',
+      ai: {
+        english: result.aiEnglish || '',
+        chinese: result.aiChinese || '',
+        correction: result.aiCorrection || null,
+      },
+      tokens: this.parseWords(result.aiEnglish || ''),
+      isVoice: true,
+      isPending: false,
+      aiAudioPath: null,
+      userAudioPath: null,
+    };
+
+    const updatedHistory = [...history, turn];
+    const newHistory = { ...this.data.scenarioHistory, [scenarioId]: updatedHistory };
+
+    this.setData({
+      scenarioHistory: newHistory,
+      displayTurns: updatedHistory,
+      showWelcome: false,
+      isLoading: false,
+      characterState: CHARACTER_STATES.SPEAKING,
+      callStatus: 'speaking',
+    }, () => {
+      this._syncAmbient();
+      this._scrollToBottom();
+    });
+    this.saveScenarioHistory();
+    this.updateWordTokens(turn.ai.english);
   },
 
   startCallRecording() {
@@ -566,19 +723,26 @@ Page({
   },
 
   endCall() {
-    // 结束通话前，把最后一段未发送的录音帧送出去，避免丢失
-    // processCallUtterance 是异步的（写文件+调API），所以不能等它完成再清理
-    if (this._callSpeechFrames && this._callSpeechFrames.length >= VAD_MIN_SPEECH_FRAMES) {
-      const frames = [...this._callSpeechFrames];
+    // 结束通话前，发送 sendEnd 告诉后端处理
+    if (this._wsStream) {
+      if (this._callSpeechFrames && this._callSpeechFrames.length > 0) {
+        // 把最后几帧也发出去
+        for (const frame of this._callSpeechFrames) {
+          this._wsStream.sendPcm(frame);
+        }
+      }
+      this._wsStream.sendEnd();
       this._callSpeechFrames = [];
-      this._callListening = false;
-      this._callPendingFrames = null;
-      // 不清除 _switchingMode，让 processCallUtterance 执行时 isCallActive 仍为 true
-      this.processCallUtterance(frames);
     }
 
     // 清理所有音频状态
     this._resetAllAudioState();
+    if (this._wsStream) {
+      this._wsStream.close();
+      this._wsStream = null;
+    }
+    this._wsAudioBuffer = [];
+    this._wsPlaying = false;
     this.setData({
       isCallActive: false,
       callStatus: 'idle',
@@ -608,8 +772,7 @@ Page({
   },
 
   // VAD 逐帧处理（半双工：录音只在上一次 AI 播完后运行）
-  // 采用近场检测：当能量突然跳升（≥2 倍）时判定为用户靠近说话，开始采帧；
-  // 持续采帧直到静音帧数达到阈值，停止并发送
+  // 采用近场检测 + WebSocket 流式发送
   handleCallFrame(res) {
     try {
       if (!this.data.isCallActive || !this._callListening) return;
@@ -618,7 +781,7 @@ Page({
       const energy = calcEnergy(res.frameBuffer);
       this._anyFrameReceived = true;
 
-      // 自适应噪声底噪：前 10 帧取最小值作为底噪
+      // 自适应噪声底噪
       if (this._noiseCalibFrames < 10) {
         this._noiseFloor = Math.min(this._noiseFloor, energy);
         this._noiseCalibFrames++;
@@ -629,64 +792,50 @@ Page({
         this._noiseFloor = this._noiseFloor * 0.95 + energy * 0.05;
       }
 
-      // 近场检测：能量高于底噪 3 倍 → 判定为用户说话
+      // 近场检测
       const isAboveNoise = energy > this._noiseFloor * 3;
 
-      // 近场激活：检测到能量高于底噪 → 开始采帧
       if (isAboveNoise && !this._nearFieldActive) {
         console.log('[VAD] near-field speech detected, energy:', Math.round(energy), 'noiseFloor:', Math.round(this._noiseFloor));
         this._nearFieldActive = true;
         this._callSpeechFrames = [];
         this._callSilenceCount = 0;
         this._recordStartTime = Date.now();
-        this._peakEnergy = energy; // 记录说话期间的峰值能量
-        this._callSpeechFrames.push(res.frameBuffer);
+        this._peakEnergy = energy;
         this._lastSpeechTime = Date.now();
       }
 
-      // 近场激活后，所有帧都采
       if (this._nearFieldActive) {
-        // 先判断是否相对静音：相比峰值能量下降 > 60%
+        // WebSocket 模式：直接发送 PCM 帧到后端
+        if (this._wsStream) {
+          this._wsStream.sendPcm(res.frameBuffer);
+        }
+
         const isRelativeSilence = this._peakEnergy > 0 && energy < this._peakEnergy * 0.4;
 
         if (isAboveNoise && !isRelativeSilence) {
-          // 真正在说话（能量高且没有明显下降）
           this._lastSpeechTime = Date.now();
           this._callSilenceCount = 0;
-          this._callSpeechFrames.push(res.frameBuffer);
           if (energy > this._peakEnergy) {
             this._peakEnergy = energy;
           }
-
-          // 防止单段语音无限累积
-          if (this._callSpeechFrames.length >= VAD_MAX_SPEECH_FRAMES) {
-            console.log('[VAD] max frames reached, sending');
-            this._callListening = false;
-            this._nearFieldActive = false;
-            this._callPendingFrames = [...this._callSpeechFrames];
-            this._callSpeechFrames = [];
-            this.recorderManager.stop();
-          }
         } else {
-          // 相对静音：能量明显下降（用户说完了），或能量低于底噪
           this._callSilenceCount++;
           if (this._callSilenceCount >= VAD_SILENCE_FRAMES) {
-            console.log('[VAD] silence threshold reached, sending frames:', this._callSpeechFrames.length);
+            console.log('[VAD] silence threshold reached');
             this._callListening = false;
             this._nearFieldActive = false;
-            this._callPendingFrames = [...this._callSpeechFrames];
-            this._callSpeechFrames = [];
-            this.recorderManager.stop();
+            // 告诉后端用户说完了
+            if (this._wsStream) {
+              this._wsStream.sendEnd();
+            }
           }
         }
       }
 
-      // 更新上一帧能量（用于近场检测）
-      this._lastEnergy = energy;
-
       // 调试日志
-      if (this._callSpeechFrames.length % 10 === 0 && this._nearFieldActive) {
-        console.log('[VAD] energy:', Math.round(energy), 'noiseFloor:', Math.round(this._noiseFloor), 'nearField:', this._nearFieldActive, 'frames:', this._callSpeechFrames.length);
+      if (this._nearFieldActive && this._callSpeechFrames.length % 10 === 0) {
+        console.log('[VAD] energy:', Math.round(energy), 'noiseFloor:', Math.round(this._noiseFloor), 'nearField:', this._nearFieldActive);
       }
     } catch (e) {
       console.error('VAD error:', e);
